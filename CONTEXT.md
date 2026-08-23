@@ -45,7 +45,7 @@ An Operator action that stops an Account from signing in without erasing its Ses
 _Avoid_: Delete, suspend (as a second word for the same thing)
 
 **Deletion**:
-The Account's own erasure of itself: Account, Sessions, Workspaces, and Credentials. It is not a Ban.
+The Account's own erasure of itself: Account, Sessions, Workspaces, Credentials, and a live Executing Session. It is not a Ban.
 _Avoid_: Ban, deactivation
 
 **Control plane**:

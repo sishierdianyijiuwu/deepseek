@@ -20,4 +20,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **Daily E2B minutes are not counted here** — hydrate and copy-back own the 1 GiB ingest; the UTC-day runtime cap is a later ticket.
+- **Daily E2B minutes are not counted here** — workspace-cloud owns 1 GiB ingest; Host/`dsh-e2b` owns the UTC-day minute cap.
