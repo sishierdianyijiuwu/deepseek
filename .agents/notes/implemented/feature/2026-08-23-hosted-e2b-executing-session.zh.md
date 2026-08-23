@@ -14,7 +14,7 @@ Status: implemented
 
 `dsh-workspace-cloud` 在 Executing Session 开始时把常规文件 hydrate 进沙箱 cwd（跳过 `.dsh-e2b`），并在家族（父 Session 与仍存活的子 Session）idle 后通过同一 1 GiB 上限回拷远程目录树。超过上限时在任何持久 unlink／写入之前抛出 `CloudWorkspaceQuotaError`。合法的 ≤1 GiB 替换先清空再写入，避免残留文件触发逐文件 `treeBytes`。任何回拷失败都会追加 `workspace/copy-back-failed`。沙箱 kill／过期不删除持久目录。
 
-Host 的 `session.prompt` / `subagent.prompt` 在 prompt 接纳之后按家族根 Session 获取该 Account 的锁。第二个家族以 `executing-session-busy` 拒绝。额外标签页可以对同一家族做 history／mux／prompt；idle 回拷之后若家族再次 running，则保留沙箱。`startExecutingSession`／`stopExecutingSession` 共用一条按 Account 串行链。HTTP 测试伪造 E2B SDK。
+Host 的 `session.prompt` / `subagent.prompt` 在 prompt 接纳之后按家族根 Session 获取该 Account 的锁。第二个家族以 `executing-session-busy` 拒绝。额外标签页可以对同一家族做 history／mux／prompt。Host 在入队 `startExecutingSession` 之前先加上 executing hold；该调用报告创建还是复用，因此替换沙箱会被 hydrate。回拷 waiter 把仍存活的沙箱视为 `executingSandbox === bind.sandbox`；若 stop 已删除槽位则丢掉 waiter，好让替换 start 安排自己的 waiter。`startExecutingSession`／`stopExecutingSession` 共用一条按 Account 串行链。托管 `api-gateway` inject `e2b`，且 `createApiProxy` 把回拷 drain 挂在 `e2b` 之下，因此 drain 先于沙箱 kill。HTTP 测试伪造 E2B SDK，并把 `e2b` 放在网关之后加载。
 
 ## Alternatives considered
 

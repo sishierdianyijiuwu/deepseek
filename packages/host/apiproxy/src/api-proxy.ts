@@ -1160,15 +1160,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return undefined
   }
 
-  const executingCopyBack = new Set<SessionId>()
+  const executingCopyBack = new Map<SessionId, ExecutingBind['sandbox']>()
   const executingHolds = new Map<SessionId, number>()
   const executingDrains = new Set<Promise<void>>()
 
-  if (ctx.get('e2b')?.perExecutingSession === true) {
-    ctx.effect(() => async () => {
-      await Promise.all([...executingDrains])
-    }, 'hosted executing-session copy-back drain')
+  const drainExecutingCopyBack = (): (() => Promise<void>) => async () => {
+    await Promise.all([...executingDrains])
   }
+  ctx.effect(drainExecutingCopyBack, 'hosted executing-session copy-back drain')
+  ctx.inject(['e2b'], (e2bCtx) => {
+    if (e2bCtx.e2b.perExecutingSession !== true) return
+    e2bCtx.effect(drainExecutingCopyBack, 'hosted executing-session copy-back drain')
+  })
 
   function familyRootId(sessionId: SessionId): SessionId {
     let current = sessionId
@@ -1197,7 +1200,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     account: AccountId
     rootId: SessionId
     workspace: Workspace
-    sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>
+    sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>['sandbox']
     reused: boolean
   }
 
@@ -1257,11 +1260,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }),
       }
     }
-    const reused = e2b.executingSessionId(account) === rootId
-    let sandbox
+    addExecutingHold(rootId)
+    let sandbox: ExecutingBind['sandbox']
+    let reused: boolean
     try {
-      sandbox = await e2b.startExecutingSession(account, rootId)
+      const started = await e2b.startExecutingSession(account, rootId)
+      sandbox = started.sandbox
+      reused = started.reused
     } catch (error: unknown) {
+      releaseExecutingHold(rootId)
       if (error instanceof ExecutingSessionBusyError) {
         return {
           refused: err(request, {
@@ -1273,7 +1280,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       }
       throw error
     }
-    addExecutingHold(rootId)
     try {
       if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
     } catch (error: unknown) {
@@ -1299,13 +1305,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     const cloud = ctx.get('cloudWorkspaces')
     releaseExecutingHold(bind.rootId)
     if (e2b === undefined || cloud === undefined) return
-    if (executingCopyBack.has(bind.rootId)) return
-    executingCopyBack.add(bind.rootId)
+    if (executingCopyBack.get(bind.rootId) === bind.sandbox) return
+    executingCopyBack.set(bind.rootId, bind.sandbox)
     const drain = (async () => {
       try {
         for (;;) {
           await whenFamilyIdle(bind.rootId)
           if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) return
           try {
             await cloud.copyBackFrom(
               bind.account,
@@ -1327,14 +1334,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             )
           }
           if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) return
           await e2b.stopExecutingSession(bind.account, bind.rootId, {
             skipIf: () => familyBusy(bind.rootId),
           })
-          if (familyBusy(bind.rootId) || e2b.executingSessionId(bind.account) === bind.rootId) continue
+          if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) === bind.sandbox) continue
           return
         }
       } finally {
-        executingCopyBack.delete(bind.rootId)
+        if (executingCopyBack.get(bind.rootId) === bind.sandbox) {
+          executingCopyBack.delete(bind.rootId)
+        }
       }
     })()
     executingDrains.add(drain)

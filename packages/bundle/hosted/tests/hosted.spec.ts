@@ -38,7 +38,7 @@ describe('dsh-hosted bundle', () => {
     for (const row of rows) {
       expect(manifest.dependencies).toHaveProperty(row.name ?? '')
     }
-    const overrides = (parsed as { id?: string; name?: string; disabled?: boolean }[])
+    const overrides = (parsed as { id?: string; name?: string; disabled?: boolean; inject?: string[] }[])
       .filter(patch => patch.id !== undefined)
     expect(overrides.map(patch => patch.id)).toEqual([
       'credentials',
@@ -48,7 +48,9 @@ describe('dsh-hosted bundle', () => {
       'sandbox',
       'sandbox-policy',
       'directory-picker',
+      'api-gateway',
     ])
+    expect(overrides.find(patch => patch.id === 'api-gateway')?.inject).toEqual(['e2b'])
     expect(overrides.find(patch => patch.id === 'credentials')?.name).toBe('@deepseek-ai/dsh-credentials-account')
     expect(overrides.find(patch => patch.id === 'subprocess')?.name).toBe('@deepseek-ai/dsh-subprocess-e2b')
     expect(overrides.find(patch => patch.id === 'fs-sandbox')?.name).toBe('@deepseek-ai/dsh-fs-e2b')

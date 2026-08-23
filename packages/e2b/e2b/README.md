@@ -20,7 +20,7 @@ Shared lifecycle owner for one E2B sandbox. The filesystem and subprocess adapte
   name: '@deepseek-ai/dsh-fs-e2b'
 ```
 
-`apiKey` is optional and otherwise reads `E2B_API_KEY`; the key configures the host SDK connection and is never installed in the sandbox. `cwd` defaults to `/home/user/workspace` and must be an absolute POSIX path. `timeoutMs` defaults to five minutes and controls the sandbox lifetime; expiry deletes the sandbox. `perExecutingSession` (default false) creates one sandbox per Account Executing Session instead of one process-wide sandbox; a second Session is refused with `ExecutingSessionBusyError` until `stopExecutingSession`. Sandbox expiry does not delete a durable Workspace.
+`apiKey` is optional and otherwise reads `E2B_API_KEY`; the key configures the host SDK connection and is never installed in the sandbox. `cwd` defaults to `/home/user/workspace` and must be an absolute POSIX path. `timeoutMs` defaults to five minutes and controls the sandbox lifetime; expiry deletes the sandbox. `perExecutingSession` (default false) creates one sandbox per Account Executing Session instead of one process-wide sandbox; a second Session is refused with `ExecutingSessionBusyError` until `stopExecutingSession`. `startExecutingSession` returns `{ sandbox, reused }`. `executingSandbox` is the live handle Host waiters compare. Sandbox expiry does not delete a durable Workspace.
 
 ## Lifecycle and ownership
 

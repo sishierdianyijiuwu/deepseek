@@ -49,39 +49,49 @@ function createRemoteWorld(): {
   }
   remote: Map<string, RemoteFile>
   created: number
+  killed: boolean
 } {
   const remote = new Map<string, RemoteFile>()
-  const world = {
-    files: {
-      makeDir: async (path: string): Promise<void> => {
-        remote.set(path, { data: new Uint8Array(), type: 'dir' })
-      },
-      write: async (path: string, data: string | Uint8Array): Promise<void> => {
-        const bytes = typeof data === 'string' ? Buffer.from(data) : data
-        remote.set(path, { data: Uint8Array.from(bytes), type: 'file' })
-      },
-      read: async (path: string): Promise<Uint8Array> => {
-        const entry = remote.get(path)
-        if (entry === undefined || entry.type !== 'file') throw new Error(`missing ${path}`)
-        return entry.data
-      },
-      list: async (path: string) => {
-        const prefix = path.endsWith('/') ? path : `${path}/`
-        const listed: Array<{ path: string; name: string; type: string; symlinkTarget?: string }> = []
-        for (const [remotePath, entry] of remote) {
-          if (remotePath === path || !remotePath.startsWith(prefix)) continue
-          listed.push({
-            path: remotePath,
-            name: remotePath.slice(remotePath.lastIndexOf('/') + 1),
-            type: entry.type,
-            ...entry.symlinkTarget === undefined ? {} : { symlinkTarget: entry.symlinkTarget },
-          })
-        }
-        return listed
+  const handle = {
+    world: {
+      files: {
+        makeDir: async (path: string): Promise<void> => {
+          if (handle.killed) throw new Error('sandbox killed')
+          remote.set(path, { data: new Uint8Array(), type: 'dir' })
+        },
+        write: async (path: string, data: string | Uint8Array): Promise<void> => {
+          if (handle.killed) throw new Error('sandbox killed')
+          const bytes = typeof data === 'string' ? Buffer.from(data) : data
+          remote.set(path, { data: Uint8Array.from(bytes), type: 'file' })
+        },
+        read: async (path: string): Promise<Uint8Array> => {
+          if (handle.killed) throw new Error('sandbox killed')
+          const entry = remote.get(path)
+          if (entry === undefined || entry.type !== 'file') throw new Error(`missing ${path}`)
+          return entry.data
+        },
+        list: async (path: string) => {
+          if (handle.killed) throw new Error('sandbox killed')
+          const prefix = path.endsWith('/') ? path : `${path}/`
+          const listed: Array<{ path: string; name: string; type: string; symlinkTarget?: string }> = []
+          for (const [remotePath, entry] of remote) {
+            if (remotePath === path || !remotePath.startsWith(prefix)) continue
+            listed.push({
+              path: remotePath,
+              name: remotePath.slice(remotePath.lastIndexOf('/') + 1),
+              type: entry.type,
+              ...entry.symlinkTarget === undefined ? {} : { symlinkTarget: entry.symlinkTarget },
+            })
+          }
+          return listed
+        },
       },
     },
+    remote,
+    created: 0,
+    killed: false,
   }
-  return { world, remote, created: 0 }
+  return handle
 }
 
 let root: string | undefined
@@ -91,6 +101,11 @@ const mailbox: MailMessage[] = []
 let currentWorld: ReturnType<typeof createRemoteWorld> | undefined
 
 afterEach(async () => {
+  const e2b = context?.get('e2b')
+  if (e2b instanceof FakeE2B) {
+    e2b.startEnqueued?.resolve(undefined)
+    e2b.stopBarrier?.hold.resolve(undefined)
+  }
   for (const gate of idleGates.values()) gate.resolve(undefined)
   await new Promise(resolve => setTimeout(resolve, 100))
   await context?.fiber.dispose()
@@ -143,21 +158,40 @@ class FakeE2B extends Service {
   readonly perExecutingSession = true
   readonly cwd = '/home/user/workspace'
   private readonly slots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
+  private chain: Promise<unknown> = Promise.resolve()
+  /** Resolved when `startExecutingSession` is called, before it joins the Account chain. */
+  startEnqueued: PromiseWithResolvers<undefined> | undefined
+  /** When set, stop waits on `hold` so a follow-up can join the Account chain. */
+  stopBarrier: {
+    entered: PromiseWithResolvers<undefined>
+    hold: PromiseWithResolvers<undefined>
+    afterDelete: boolean
+  } | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'e2b')
   }
 
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(operation, operation)
+    this.chain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   async startExecutingSession(accountId: AccountId, sessionId: SessionId) {
-    const existing = this.slots.get(accountId)
-    if (existing !== undefined && existing.sessionId !== sessionId) {
-      throw new ExecutingSessionBusyError(existing.sessionId)
-    }
-    const world = existing?.world ?? createRemoteWorld()
-    this.slots.set(accountId, { sessionId, world })
-    world.created += 1
-    currentWorld = world
-    return world.world
+    this.startEnqueued?.resolve(undefined)
+    return this.enqueue(async () => {
+      const existing = this.slots.get(accountId)
+      if (existing !== undefined && existing.sessionId !== sessionId) {
+        throw new ExecutingSessionBusyError(existing.sessionId)
+      }
+      const reused = existing !== undefined && existing.sessionId === sessionId
+      const world = existing?.world ?? createRemoteWorld()
+      if (!reused) world.created += 1
+      this.slots.set(accountId, { sessionId, world })
+      currentWorld = world
+      return { sandbox: world.world, reused }
+    })
   }
 
   async stopExecutingSession(
@@ -165,13 +199,36 @@ class FakeE2B extends Service {
     sessionId: SessionId,
     opts?: { skipIf?: () => boolean },
   ): Promise<void> {
-    if (opts?.skipIf?.() === true) return
-    const existing = this.slots.get(accountId)
-    if (existing?.sessionId === sessionId) this.slots.delete(accountId)
+    return this.enqueue(async () => {
+      const barrier = this.stopBarrier
+      if (barrier !== undefined && !barrier.afterDelete) {
+        barrier.entered.resolve(undefined)
+        await barrier.hold.promise
+      }
+      if (opts?.skipIf?.() === true) return
+      const existing = this.slots.get(accountId)
+      if (existing?.sessionId === sessionId) {
+        existing.world.killed = true
+        this.slots.delete(accountId)
+      }
+      if (barrier?.afterDelete === true) {
+        barrier.entered.resolve(undefined)
+        await barrier.hold.promise
+      }
+    })
   }
 
   executingSessionId(accountId: AccountId): SessionId | undefined {
     return this.slots.get(accountId)?.sessionId
+  }
+
+  executingSandbox(accountId: AccountId) {
+    return this.slots.get(accountId)?.world.world
+  }
+
+  killLiveSlots(): void {
+    for (const existing of this.slots.values()) existing.world.killed = true
+    this.slots.clear()
   }
 }
 
@@ -252,13 +309,13 @@ async function boot(): Promise<Harness> {
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: '@deepseek-ai/dsh-storage'",
     "- name: '@deepseek-ai/dsh-credentials'",
-    "- name: '@deepseek-ai/dsh-e2b'",
     "- name: 'test-api-proxy'",
     "- name: '@deepseek-ai/dsh-workspace'",
     "- name: '@deepseek-ai/dsh-workspace-cloud'",
     '  config:',
     "    url: 'pglite:'",
     `    root: ${JSON.stringify(files)}`,
+    "- name: '@deepseek-ai/dsh-e2b'",
     "- name: '@deepseek-ai/dsh-client-connection'",
     '',
   ].join('\n'))
@@ -510,5 +567,98 @@ describe('E2B Executing Session over HTTP', () => {
     const files = await rpc(harness, jar, 'workspace.listFiles', { workspaceId })
     expect((files.body as { result?: { value?: { paths?: string[] } } }).result?.value?.paths)
       .toEqual(['keep.txt'])
+  })
+
+  it('keeps the live sandbox when a follow-up hold races stop', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const jar = await signInAccount(harness, 'hold@example.com', 'correct-horse')
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Hold' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const session = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionId = (session.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'go' }],
+    })).status).toBe(200)
+    expect(currentWorld?.created).toBe(1)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    e2b.stopBarrier = {
+      entered: Promise.withResolvers<undefined>(),
+      hold: Promise.withResolvers<undefined>(),
+      afterDelete: false,
+    }
+    if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+    await e2b.stopBarrier.entered.promise
+    e2b.startEnqueued = Promise.withResolvers<undefined>()
+    const followupPromise = rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again' }],
+    })
+    await e2b.startEnqueued.promise
+    e2b.stopBarrier.hold.resolve(undefined)
+    const followup = await followupPromise
+    expect((followup.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    expect(currentWorld?.created).toBe(1)
+    expect(currentWorld?.killed).toBe(false)
+    const hydrated = currentWorld?.remote.get('/home/user/workspace/note.txt')
+    expect(Buffer.from(hydrated?.data ?? new Uint8Array()).toString()).toBe('hello')
+    if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+  })
+
+  it('hydrates a replacement sandbox when stop deleted the previous slot', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const jar = await signInAccount(harness, 'replace@example.com', 'correct-horse')
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Replace' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const session = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionId = (session.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'go' }],
+    })).status).toBe(200)
+    const firstWorld = currentWorld
+    expect(firstWorld?.created).toBe(1)
+    await currentWorld?.world.files.write('/home/user/workspace/out.txt', Buffer.from('new'))
+    if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+    await expect.poll(async () => {
+      const listed = await rpc(harness, jar, 'workspace.listFiles', { workspaceId })
+      return (listed.body as { result?: { value?: { paths?: string[] } } }).result?.value?.paths
+    }).toEqual(['note.txt', 'out.txt'])
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    e2b.killLiveSlots()
+    expect(firstWorld?.killed).toBe(true)
+    const followup = await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again' }],
+    })
+    expect((followup.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    expect(currentWorld).not.toBe(firstWorld)
+    expect(currentWorld?.created).toBe(1)
+    const hydrated = currentWorld?.remote.get('/home/user/workspace/out.txt')
+    expect(hydrated).toBeDefined()
+    expect(Buffer.from(hydrated?.data ?? new Uint8Array()).toString()).toBe('new')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const history = await rpc(harness, jar, 'session.history', { sessionId })
+    const events = (history.body as {
+      result?: { value?: { events?: Array<{ event?: { type?: string } }> } }
+    }).result?.value?.events ?? []
+    expect(events.some(entry => entry.event?.type === 'workspace/copy-back-failed')).toBe(false)
+    if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
   })
 })

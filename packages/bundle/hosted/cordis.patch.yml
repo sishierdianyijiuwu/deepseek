@@ -77,3 +77,8 @@
 # Account's tree.
 - id: directory-picker
   disabled: true
+
+# Gateway waits for e2b so copy-back drain disposes before sandbox kill.
+- id: api-gateway
+  inject:
+    - e2b
