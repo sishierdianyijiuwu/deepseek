@@ -18,6 +18,8 @@ import CloudWorkspaces, {
   DEFAULT_WORKSPACE_TITLE,
   MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
+  type ExecutionWorld,
+  type ExecutionWorldEntry,
 } from '../src/index.ts'
 import { createBareRepo, generateSelfSignedTls, listenGitHttps } from './git-http-fixture.ts'
 
@@ -125,6 +127,54 @@ describe('CloudWorkspaces', () => {
     await expect(stat(second.path)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(stat(join(files, owner))).rejects.toMatchObject({ code: 'ENOENT' })
     await stat(stranger.path)
+  })
+
+  it('hydrates into an execution world and copies back under the cap', { timeout: 30_000 }, async () => {
+    const { cloud } = await boot()
+    const owner = accountId('hydrate')
+    const workspace = await cloud.createEmpty(owner)
+    await cloud.writeFile(owner, workspace.id, 'a.txt', Buffer.from('src'))
+    const remote = new Map<string, { data: Uint8Array; type: 'file' | 'dir'; symlinkTarget?: string }>()
+    const world: ExecutionWorld = {
+      files: {
+        makeDir: async (path: string) => { remote.set(path, { data: new Uint8Array(), type: 'dir' }) },
+        write: async (path: string, data: string | Uint8Array) => {
+          remote.set(path, {
+            data: Uint8Array.from(typeof data === 'string' ? Buffer.from(data) : data),
+            type: 'file',
+          })
+        },
+        read: async (path: string) => {
+          const entry = remote.get(path)
+          if (entry === undefined) throw new Error('missing')
+          return entry.data
+        },
+        list: async (path: string) => {
+          const prefix = `${path}/`
+          const listed: ExecutionWorldEntry[] = []
+          for (const [remotePath, entry] of remote) {
+            if (remotePath === path || !remotePath.startsWith(prefix)) continue
+            listed.push({
+              path: remotePath,
+              name: remotePath.slice(remotePath.lastIndexOf('/') + 1),
+              type: entry.type,
+              ...entry.symlinkTarget === undefined ? {} : { symlinkTarget: entry.symlinkTarget },
+            })
+          }
+          return listed
+        },
+      },
+    }
+    await cloud.hydrateInto(owner, workspace.id, world, '/home/user/workspace')
+    expect(Buffer.from(remote.get('/home/user/workspace/a.txt')!.data).toString()).toBe('src')
+    await world.files.write('/home/user/workspace/a.txt', Buffer.from('dst'))
+    await world.files.write('/home/user/workspace/b.txt', Buffer.from('b'))
+    await cloud.copyBackFrom(owner, workspace.id, world, '/home/user/workspace')
+    expect(await cloud.listFiles(owner, workspace.id)).toEqual(['a.txt', 'b.txt'])
+    await expect(cloud.hydrateInto(owner, WorkspaceId('missing'), world, '/w'))
+      .rejects.toBeInstanceOf(CloudWorkspaceNotFoundError)
+    await expect(cloud.copyBackFrom(owner, WorkspaceId('missing'), world, '/w'))
+      .rejects.toBeInstanceOf(CloudWorkspaceNotFoundError)
   })
 
   it('creates concurrently without exceeding the count cap', { timeout: 30_000 }, async () => {

@@ -17,12 +17,18 @@ import { isUniqueViolation, openSql, type SqlClient } from '@deepseek-ai/dsh-acc
 import {
   CloudWorkspacePathError,
   CloudWorkspaceQuotaError,
+  ingestWorkspaceTree,
   listWorkspaceFiles,
   MAX_WORKSPACE_BYTES,
   readWorkspaceFile,
   treeBytes,
   writeWorkspaceFile,
 } from './files.ts'
+import {
+  copyBackWorkspace,
+  hydrateWorkspace,
+  type ExecutionWorld,
+} from './sync.ts'
 import {
   clonePublicGit,
   DEFAULT_WORKSPACE_TITLE,
@@ -33,7 +39,13 @@ import {
 import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
 
 export { SCHEMA_VERSION }
-export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError }
+export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError, ingestWorkspaceTree }
+export {
+  copyBackWorkspace,
+  EXECUTION_WORLD_RUNTIME_DIR,
+  hydrateWorkspace,
+} from './sync.ts'
+export type { ExecutionWorld, ExecutionWorldEntry, ExecutionWorldFiles } from './sync.ts'
 export {
   CloudWorkspaceImportError,
   CloudWorkspaceImportUrlError,
@@ -388,6 +400,47 @@ export class CloudWorkspaces extends Service {
       const path = await this.ownedPath(accountId, workspaceId)
       if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
       return readWorkspaceFile(path, relativePath)
+    })
+  }
+
+  /**
+   * Copy this Account's durable Workspace files into an execution-world cwd.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param world - execution-world filesystem (the E2B sandbox).
+   * @param remoteCwd - absolute sandbox working directory.
+   */
+  async hydrateInto(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    world: ExecutionWorld,
+    remoteCwd: string,
+  ): Promise<void> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await hydrateWorkspace(path, world, remoteCwd)
+    })
+  }
+
+  /**
+   * Replace the durable Workspace with the execution-world tree, refusing a
+   * copy past 1 GiB without growing the durable copy.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param world - execution-world filesystem (the E2B sandbox).
+   * @param remoteCwd - absolute sandbox working directory.
+   */
+  async copyBackFrom(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    world: ExecutionWorld,
+    remoteCwd: string,
+  ): Promise<void> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await copyBackWorkspace(path, world, remoteCwd)
     })
   }
 

@@ -350,7 +350,9 @@ export interface SessionsApi {
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains
    * valid for non-browser callers. Session-backed subagents reject with `agent-busy` and use
    * `subagent.prompt`. When Accounts are composed, an Account with no stored
-   * model Credential is refused with `credential-missing`.
+   * model Credential is refused with `credential-missing`. A second Executing
+   * Session is refused with `executing-session-busy` until the first stops;
+   * extra tabs may still read and prompt the same Executing Session.
    */
   prompt(request: RpcRequest<{
     sessionId: SessionId

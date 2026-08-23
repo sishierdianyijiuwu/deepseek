@@ -88,6 +88,9 @@ describe('rpcErrorSchema', () => {
     // The credentials producer still emits this code, so the branch has to stay.
     expect(rpcErrorSchema.parse({ code: 'credential-rejected', message: 'm', details: { ref: 'r' } }).code).toBe('credential-rejected')
     expect(rpcErrorSchema.parse({ code: 'credential-missing', message: 'm', details: {} }).code).toBe('credential-missing')
+    expect(rpcErrorSchema.parse({
+      code: 'executing-session-busy', message: 'm', details: { sessionId: 's' },
+    }).code).toBe('executing-session-busy')
     expect(rpcErrorSchema.parse({ code: 'operator-access-readonly', message: 'm', details: {} }).code)
       .toBe('operator-access-readonly')
     expect(rpcErrorSchema.parse({ code: 'internal', message: 'm', details: {} }).code).toBe('internal')

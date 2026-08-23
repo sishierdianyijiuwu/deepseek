@@ -20,11 +20,11 @@
   name: '@deepseek-ai/dsh-fs-e2b'
 ```
 
-`apiKey` 可省略；省略时读取 `E2B_API_KEY`。该密钥只配置宿主 SDK 连接，绝不会安装进沙箱。`cwd` 默认为 `/home/user/workspace`，并且必须是绝对 POSIX 路径。`timeoutMs` 默认为 5 分钟并控制沙箱生命周期；超时会删除沙箱。
+`apiKey` 可省略；省略时读取 `E2B_API_KEY`。该密钥只配置宿主 SDK 连接，绝不会安装进沙箱。`cwd` 默认为 `/home/user/workspace`，并且必须是绝对 POSIX 路径。`timeoutMs` 默认为 5 分钟并控制沙箱生命周期；超时会删除沙箱。`perExecutingSession`（默认 false）按 Account 的 Executing Session 创建沙箱，而不是进程级单沙箱；在 `stopExecutingSession` 之前，第二个 Session 会以 `ExecutingSessionBusyError` 被拒绝。`startExecutingSession` 返回 `{ sandbox, reused }`。`executingSandbox` 是 Host waiter 用来比较的仍存活句柄。沙箱过期不会删除持久 Workspace。
 
 ## 生命周期与所有权
 
-构造阶段会启动一次沙箱创建。服务在 `getSandbox()` 成功返回前，会创建 `cwd` 和私有的 `cwd/.dsh-e2b` 适配器状态目录，验证该预留路径是真实目录而非符号链接或其他文件类型，再把该目录的 mode 设为 `0700`。每个适配器内部的 E2B 命令 shell 都会获得一个位于根目录下、全新随机生成的 `HOME`，因此 SDK 固定使用的登录 shell 不会在控制命令之前解析可变用户主目录中的配置文件。
+除非设置 `perExecutingSession`，构造阶段会启动一次沙箱创建。服务在 `getSandbox()` 成功返回前，会创建 `cwd` 和私有的 `cwd/.dsh-e2b` 适配器状态目录，验证该预留路径是真实目录而非符号链接或其他文件类型，再把该目录的 mode 设为 `0700`。托管模式改为在 `startExecutingSession` 中创建该沙箱。每个适配器内部的 E2B 命令 shell 都会获得一个位于根目录下、全新随机生成的 `HOME`，因此 SDK 固定使用的登录 shell 不会在控制命令之前解析可变用户主目录中的配置文件。
 
 资源释放会先阻止继续获取新句柄，再等待初始化完成，然后删除沙箱。`SandboxNotFoundError` 表示沙箱已因超时或被另一个所有者删除，因此可视为完全停稳。初始目录设置失败时会尝试删除一次；若该尝试也失败，则由已配置的 E2B 超时约束沙箱的存活时间。提供方插件必须在该所有者之后加载，并在其之前 dispose（资源释放）。
 
@@ -40,5 +40,5 @@
 
 - **这不是完整的 harness 运行时**：Cordis 服务、agent（智能体）／会话状态、会话日志、LLM（大语言模型）请求、skill（技能）和 SDK 侧缓冲仍留在宿主进程中。
 - **沙箱状态是短暂的**：资源释放和超时都会删除沙箱；重新连接、pause/leave 保留、模板、卷和快照均不在本 POC 范围内。
-- **没有配置部署平台**：网络策略、宿主工作区同步和沙箱发现均不在本 POC 范围内。
+- **托管 hydrate 由 workspace-cloud 拥有**：本包创建并删除沙箱；持久 Workspace 拷贝不是本所有者。
 - **`cwd` 是解析约定，而不是包含边界**：适配器和命令可以访问沙箱中的其他路径；E2B 网络访问也继续采用基础镜像的策略。

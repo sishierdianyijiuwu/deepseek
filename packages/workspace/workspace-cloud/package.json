@@ -38,6 +38,7 @@
     "@deepseek-ai/dsh-account": "workspace:^",
     "@deepseek-ai/dsh-account-postgres": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-workspace": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
@@ -45,6 +46,7 @@
     "@deepseek-ai/dsh-account": "workspace:^",
     "@deepseek-ai/dsh-account-postgres": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-storage": "workspace:^",
     "@deepseek-ai/dsh-storage-domain": "workspace:^",
     "@deepseek-ai/dsh-workspace": "workspace:^",

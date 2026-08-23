@@ -19,6 +19,15 @@
       "path": "../../util/brand"
     },
     {
+      "path": "../../account/account"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
+      "path": "../../core/session"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

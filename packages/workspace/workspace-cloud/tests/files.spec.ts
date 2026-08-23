@@ -7,6 +7,7 @@ import {
   CloudWorkspacePathError,
   CloudWorkspaceQuotaError,
   MAX_WORKSPACE_BYTES,
+  ingestWorkspaceTree,
   listWorkspaceFiles,
   readWorkspaceFile,
   resolveWorkspaceFile,
@@ -104,5 +105,41 @@ describe('treeBytes and writeWorkspaceFile', () => {
       await rm(victim, { force: true })
       await rm(outsideDir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('ingestWorkspaceTree', () => {
+  it('replaces the tree and refuses a copy past 1 GiB without growing the durable copy', async () => {
+    const dir = await stage()
+    await writeWorkspaceFile(dir, 'keep.txt', Buffer.from('old'))
+    await writeWorkspaceFile(dir, 'gone.txt', Buffer.from('drop'))
+    await ingestWorkspaceTree(dir, [
+      { relativePath: 'keep.txt', data: Buffer.from('new') },
+      { relativePath: 'added.txt', data: Buffer.from('x') },
+    ])
+    expect(await listWorkspaceFiles(dir)).toEqual(['added.txt', 'keep.txt'])
+    expect(Buffer.from(await readWorkspaceFile(dir, 'keep.txt')).toString()).toBe('new')
+
+    const before = await treeBytes(dir)
+    await expect(ingestWorkspaceTree(dir, [
+      { relativePath: 'huge.bin', data: Buffer.alloc(MAX_WORKSPACE_BYTES + 1) },
+    ])).rejects.toBeInstanceOf(CloudWorkspaceQuotaError)
+    expect(await treeBytes(dir)).toBe(before)
+    expect(await listWorkspaceFiles(dir)).toEqual(['added.txt', 'keep.txt'])
+  })
+
+  it('replaces a legal ≤1 GiB tree regardless of write order versus leftover files', async () => {
+    const dir = await stage()
+    const keep = await open(join(dir, 'keep.bin'), 'w')
+    await keep.truncate(MAX_WORKSPACE_BYTES - 1)
+    await keep.close()
+    await writeFile(join(dir, 'other.bin'), 'y')
+    await ingestWorkspaceTree(dir, [
+      { relativePath: 'other.bin', data: Buffer.alloc(MAX_WORKSPACE_BYTES - 1) },
+      { relativePath: 'keep.bin', data: Buffer.from('x') },
+    ])
+    expect(await treeBytes(dir)).toBe(MAX_WORKSPACE_BYTES)
+    expect(await listWorkspaceFiles(dir)).toEqual(['keep.bin', 'other.bin'])
+    expect(Buffer.from(await readWorkspaceFile(dir, 'keep.bin')).toString()).toBe('x')
   })
 })
