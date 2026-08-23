@@ -142,6 +142,25 @@ async function closeOpenExecutingWorld(
   await sql.query('DELETE FROM executing_world_open WHERE account_id = $1', [accountId])
 }
 
+async function closeExecutingWorldInterval(
+  sql: SqlClient,
+  accountId: string,
+  startedAt: number,
+  at: number,
+): Promise<void> {
+  const open = await sql.query(
+    `SELECT started_at FROM executing_world_open
+     WHERE account_id = $1 AND started_at = $2 FOR UPDATE`,
+    [accountId, startedAt],
+  )
+  if (open.rows[0] === undefined) return
+  await addExecutingWorldUsage(sql, accountId, startedAt, at)
+  await sql.query(
+    'DELETE FROM executing_world_open WHERE account_id = $1 AND started_at = $2',
+    [accountId, startedAt],
+  )
+}
+
 async function closeAllOpenExecutingWorld(sql: SqlClient, at: number): Promise<void> {
   await sql.transaction(async (tx) => {
     const found = await tx.query(
@@ -644,8 +663,9 @@ export class PostgresAccounts extends Accounts {
    * Open a sandbox-running interval. A leftover open interval is closed at `at`.
    * @param accountId - owning Account.
    * @param at - interval start, milliseconds since Unix epoch.
+   * @returns `at`, the token later passed to {@link endExecutingWorld}.
    */
-  override async beginExecutingWorld(accountId: AccountId, at: number): Promise<void> {
+  override async beginExecutingWorld(accountId: AccountId, at: number): Promise<number> {
     await this.client().transaction(async (sql) => {
       await closeOpenExecutingWorld(sql, accountId, at)
       await sql.query(
@@ -653,15 +673,19 @@ export class PostgresAccounts extends Accounts {
         [accountId, at],
       )
     })
+    return at
   }
 
   /**
-   * Close this Account's sandbox-running interval and charge overlapped UTC days.
+   * Close the interval identified by `startedAt` and charge overlapped UTC days.
    * @param accountId - owning Account.
+   * @param startedAt - token returned by {@link beginExecutingWorld}.
    * @param at - interval end, milliseconds since Unix epoch.
    */
-  override async endExecutingWorld(accountId: AccountId, at: number): Promise<void> {
-    await this.client().transaction(async sql => closeOpenExecutingWorld(sql, accountId, at))
+  override async endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void> {
+    await this.client().transaction(async sql =>
+      closeExecutingWorldInterval(sql, accountId, startedAt, at),
+    )
   }
 
   /**

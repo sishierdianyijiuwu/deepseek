@@ -232,16 +232,19 @@ export abstract class Accounts extends Service {
    * is closed at `at` first. Does not enforce the daily cap.
    * @param accountId - owning Account.
    * @param at - interval start, milliseconds since Unix epoch.
+   * @returns `at`, the token later passed to {@link endExecutingWorld}.
    */
-  abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<void>
+  abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<number>
 
   /**
-   * Close this Account's sandbox-running interval at `at` and add the elapsed
-   * time to each overlapped UTC day. Missing open intervals are a no-op.
+   * Close the sandbox-running interval identified by `startedAt` and add the
+   * elapsed time to each overlapped UTC day. A missing or already-replaced
+   * interval is a no-op.
    * @param accountId - owning Account.
+   * @param startedAt - token returned by {@link beginExecutingWorld}.
    * @param at - interval end, milliseconds since Unix epoch.
    */
-  abstract endExecutingWorld(accountId: AccountId, at: number): Promise<void>
+  abstract endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void>
 
   /**
    * Sandbox-running milliseconds already charged to this Account on the UTC

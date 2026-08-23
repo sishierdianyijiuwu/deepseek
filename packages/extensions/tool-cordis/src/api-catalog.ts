@@ -185,14 +185,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'every audit row.',
       },
       {
-        signature: 'abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<void>',
+        signature: 'abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<number>',
         description: 'Open a sandbox-running interval for this Account. A leftover open interval is closed at `at` first. Does not enforce the daily cap.',
         parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'interval start, milliseconds since Unix epoch.' }],
+        returns: '`at`, the token later passed to {@link endExecutingWorld}.',
       },
       {
-        signature: 'abstract endExecutingWorld(accountId: AccountId, at: number): Promise<void>',
-        description: 'Close this Account\'s sandbox-running interval at `at` and add the elapsed time to each overlapped UTC day. Missing open intervals are a no-op.',
-        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'interval end, milliseconds since Unix epoch.' }],
+        signature: 'abstract endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void>',
+        description: 'Close the sandbox-running interval identified by `startedAt` and add the elapsed time to each overlapped UTC day. A missing or already-replaced interval is a no-op.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'startedAt', description: 'token returned by {@link beginExecutingWorld}.' }, { name: 'at', description: 'interval end, milliseconds since Unix epoch.' }],
       },
       {
         signature: 'abstract executingWorldUsedMs(accountId: AccountId, at: number): Promise<number>',
@@ -935,16 +936,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['when E2B rejects creation, the service is disposing, or no Executing Session is active.'],
       },
       {
-        signature: 'async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<ExecutingSessionStart>',
+        signature: 'async startExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { onCreated?: () => Promise<void> }, ): Promise<ExecutingSessionStart>',
         description: 'Create or reuse this Account\'s Executing Session sandbox.',
-        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the one-executing-session lock.' }],
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the one-executing-session lock.' }, { name: 'opts', description: '.onCreated - runs on the Account chain after a new sandbox is live.' }],
         returns: 'the live sandbox and whether this call reused an existing slot.',
         throws: ['{@link ExecutingSessionBusyError} when another Session holds the lock.'],
       },
       {
-        signature: 'async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean }, ): Promise<void>',
+        signature: 'async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> }, ): Promise<void>',
         description: 'Copy-back callers then kill this Account\'s sandbox. The durable Workspace is not deleted. Missing or already-expired sandboxes are quiescence.',
-        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the lock; a mismatch is ignored.' }, { name: 'opts', description: '.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.' }],
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the lock; a mismatch is ignored.' }, { name: 'opts', description: '.onStopped - runs on the Account chain after this Session\'s slot is killed.' }],
       },
       {
         signature: 'executingSessionId(accountId: AccountId): SessionId | undefined',

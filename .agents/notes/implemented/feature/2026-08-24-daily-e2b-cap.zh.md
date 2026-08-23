@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-沙箱运行时长——从 Executing Session 启动时的 `beginExecutingWorld` 到沙箱真正停止时的 `endExecutingWorld`——计入每个 Account 每个 UTC 日的 `dailyCapMinutes`（托管为 `60`）。分钟数由 `dsh-e2b` Config 持有，因此部署可从 cordis.yml 修改；`0` 或非正值会在加载时失败。PostgreSQL `SCHEMA_VERSION` `5` 存储 `executing_world_open`（仍在运行的区间）和 `executing_world_daily`（每个 `YYYY-MM-DD` 的毫秒）。提供方启动时会关闭残留的未结束区间，因此重启后的控制面会把崩溃到重启这段时间记入用量。
+沙箱运行时长——从 Executing Session 启动时的 `beginExecutingWorld` 到沙箱真正停止时的 `endExecutingWorld`——计入每个 Account 每个 UTC 日的 `dailyCapMinutes`（托管为 `60`）。分钟数由 `dsh-e2b` Config 持有，因此部署可从 cordis.yml 修改；`0` 或非正值会在加载时失败。PostgreSQL `SCHEMA_VERSION` `5` 存储 `executing_world_open`（仍在运行的区间）和 `executing_world_daily`（每个 `YYYY-MM-DD` 的毫秒）。`beginExecutingWorld` 返回 `started_at` 令牌；`endExecutingWorld` 只删除该行。Host 的 start/stop 在 per-Account 的 E2B 链上运行 begin/end。提供方启动时会关闭残留的未结束区间，因此重启后的控制面会把崩溃到重启这段时间记入用量。
 
 当 `executingWorldUsedMs` 已达上限时，Host 的 `session.prompt` / `subagent.prompt` 以 `e2b-cap-exhausted`（`capMinutes`，`resetsAt` = 下一个 UTC 零点）拒绝新的 Executing Session。复用仍在运行的 Executing Session 不再检查上限。`session.history`、登录和 `credentials.set` 从不开区间。
 
@@ -28,4 +28,4 @@ HTTP 测试伪造 `Date.now` 以滚动 UTC 日，并替换 E2B SDK。
 
 ## 后果
 
-若崩溃留下 `executing_world_open`，会一直记到下一次提供方启动；控制面长时间停机时可能用尽该 UTC 日。hydrate 仍由回拷拥有；本变更只计量 start/stop。托管的 `dailyCapMinutes: 60` 是产品默认值，仍可从 cordis.yml 覆盖。
+若崩溃留下 `executing_world_open`，会一直记到下一次提供方启动；控制面长时间停机时可能用尽该 UTC 日。hydrate 仍由回拷拥有；计量只覆盖 start/stop。托管的 `dailyCapMinutes: 60` 是产品默认值，仍可从 cordis.yml 覆盖。

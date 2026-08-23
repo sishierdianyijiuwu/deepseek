@@ -316,26 +316,28 @@ describe('postgres accounts', () => {
     const id = owner!.accountId
 
     expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
-    await accounts.endExecutingWorld(id, nowMs)
+    await accounts.endExecutingWorld(id, nowMs, nowMs)
     expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
 
-    await accounts.beginExecutingWorld(id, nowMs)
+    await expect(accounts.beginExecutingWorld(id, nowMs)).resolves.toBe(nowMs)
     expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
     const nextDay = Date.parse('2026-01-02T00:30:00.000Z')
     expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
-    await accounts.endExecutingWorld(id, nextDay)
+    await accounts.endExecutingWorld(id, nowMs, nextDay)
     expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(30 * 60_000)
     expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
 
     await accounts.beginExecutingWorld(id, nextDay)
-    await accounts.endExecutingWorld(id, nextDay - 1)
+    await accounts.endExecutingWorld(id, nextDay, nextDay - 1)
     expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
 
     await accounts.beginExecutingWorld(id, nextDay)
     const later = nextDay + 10_000
     await accounts.beginExecutingWorld(id, later)
     expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 10_000)
-    await accounts.endExecutingWorld(id, later + 5_000)
+    await accounts.endExecutingWorld(id, nextDay, later + 5_000)
+    expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 10_000)
+    await accounts.endExecutingWorld(id, later, later + 5_000)
     expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 15_000)
 
     await expect(accounts.deleteAccount(id)).resolves.toEqual({ ok: true })
@@ -365,6 +367,37 @@ describe('postgres accounts', () => {
     await second.plugin(SilentMailer).await()
     await second.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
     expect(await second.accounts.executingWorldUsedMs(owner!.accountId, nowMs)).toBe(12_000)
+    await second.fiber.dispose()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('splits a leftover open interval across UTC midnight on provider start', {
+    timeout: 30_000,
+  }, async () => {
+    mailbox.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-e2b-cap-midnight-'))
+    let nowMs = Date.parse('2026-01-01T23:30:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const url = `pglite:${dir}`
+    const first = new Context()
+    await first.plugin(SilentMailer).await()
+    await first.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    await first.accounts.register('cap@example.com', 'password12')
+    const token = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(token).toBeDefined()
+    await first.accounts.verifyEmail(token!)
+    const owner = await first.accounts.lookupByEmail('cap@example.com')
+    expect(owner).toBeDefined()
+    await first.accounts.beginExecutingWorld(owner!.accountId, nowMs)
+    await first.fiber.dispose()
+
+    nowMs = Date.parse('2026-01-02T00:30:00.000Z')
+    const second = new Context()
+    await second.plugin(SilentMailer).await()
+    await second.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    expect(await second.accounts.executingWorldUsedMs(owner!.accountId, Date.parse('2026-01-01T23:59:00.000Z')))
+      .toBe(30 * 60_000)
+    expect(await second.accounts.executingWorldUsedMs(owner!.accountId, nowMs)).toBe(30 * 60_000)
     await second.fiber.dispose()
     await rm(dir, { recursive: true, force: true })
   })

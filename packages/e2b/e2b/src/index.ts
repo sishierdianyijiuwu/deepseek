@@ -57,7 +57,8 @@ export interface Config {
   perExecutingSession?: boolean
   /**
    * Minutes of sandbox-running time each Account may use per UTC day.
-   * Hosted `perExecutingSession` enforces this when `ctx.accounts` is composed.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
    */
   dailyCapMinutes?: number
 }
@@ -209,14 +210,19 @@ export class E2BRuntime extends Service {
    * Create or reuse this Account's Executing Session sandbox.
    * @param accountId - owning Account.
    * @param sessionId - Session that holds the one-executing-session lock.
+   * @param opts.onCreated - runs on the Account chain after a new sandbox is live.
    * @returns the live sandbox and whether this call reused an existing slot.
    * @throws {@link ExecutingSessionBusyError} when another Session holds the lock.
    */
-  async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<ExecutingSessionStart> {
+  async startExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ): Promise<ExecutingSessionStart> {
     if (!this.perExecutingSession) {
       return { sandbox: await this.getSandbox(), reused: true }
     }
-    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId))
+    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId, opts))
   }
 
   /**
@@ -225,17 +231,19 @@ export class E2BRuntime extends Service {
    * @param accountId - owning Account.
    * @param sessionId - Session that holds the lock; a mismatch is ignored.
    * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+   * @param opts.onStopped - runs on the Account chain after this Session's slot is killed.
    */
   async stopExecutingSession(
     accountId: AccountId,
     sessionId: SessionId,
-    opts?: { skipIf?: () => boolean },
+    opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> },
   ): Promise<void> {
     return this.enqueueAccount(accountId, async () => {
       const slot = this.slots.get(accountId)
       if (slot === undefined || slot.sessionId !== sessionId) return
       if (opts?.skipIf?.() === true) return
       await this.killSlot(accountId)
+      await opts?.onStopped?.()
     })
   }
 
@@ -270,6 +278,7 @@ export class E2BRuntime extends Service {
   private async startExecutingSessionLocked(
     accountId: AccountId,
     sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
   ): Promise<ExecutingSessionStart> {
     if (this.disposed) throw new Error('E2B sandbox service is disposing')
     const existing = this.slots.get(accountId)
@@ -294,6 +303,13 @@ export class E2BRuntime extends Service {
         throw new Error('E2B sandbox service is disposing')
       }
       if (this.slots.get(accountId) === slot) slot.handle = created
+      try {
+        await opts?.onCreated?.()
+      } catch (error: unknown) {
+        if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
+        await this.killSandbox(created)
+        throw error
+      }
       return { sandbox: created, reused: false }
     } catch (error: unknown) {
       if (this.slots.get(accountId) === slot) this.slots.delete(accountId)

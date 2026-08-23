@@ -669,7 +669,8 @@ export interface Config {
   perExecutingSession?: boolean
   /**
    * Minutes of sandbox-running time each Account may use per UTC day.
-   * Hosted `perExecutingSession` enforces this when `ctx.accounts` is composed.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
    */
   dailyCapMinutes?: number
 }

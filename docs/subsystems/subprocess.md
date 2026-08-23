@@ -276,10 +276,11 @@ async getSandbox(): Promise<Sandbox>
  * Create or reuse this Account's Executing Session sandbox.
  * @param accountId - owning Account.
  * @param sessionId - Session that holds the one-executing-session lock.
+ * @param opts.onCreated - runs on the Account chain after a new sandbox is live.
  * @returns the live sandbox and whether this call reused an existing slot.
  * @throws {@link ExecutingSessionBusyError} when another Session holds the lock.
  */
-async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<ExecutingSessionStart>
+async startExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { onCreated?: () => Promise<void> }, ): Promise<ExecutingSessionStart>
 
 /**
  * Copy-back callers then kill this Account's sandbox. The durable Workspace
@@ -287,8 +288,9 @@ async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise
  * @param accountId - owning Account.
  * @param sessionId - Session that holds the lock; a mismatch is ignored.
  * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+ * @param opts.onStopped - runs on the Account chain after this Session's slot is killed.
  */
-async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean }, ): Promise<void>
+async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> }, ): Promise<void>
 
 /**
  * The Session that currently holds this Account's Executing Session lock.

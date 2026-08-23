@@ -184,7 +184,11 @@ class FakeE2B extends Service {
     return run
   }
 
-  async startExecutingSession(accountId: AccountId, sessionId: SessionId) {
+  async startExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ) {
     this.startEnqueued?.resolve(undefined)
     return this.enqueue(async () => {
       const existing = this.accountSlots.get(accountId)
@@ -196,6 +200,7 @@ class FakeE2B extends Service {
       if (!reused) world.created += 1
       this.accountSlots.set(accountId, { sessionId, world })
       currentWorld = world
+      if (!reused) await opts?.onCreated?.()
       return { sandbox: world.world, reused }
     })
   }
@@ -203,7 +208,7 @@ class FakeE2B extends Service {
   async stopExecutingSession(
     accountId: AccountId,
     sessionId: SessionId,
-    opts?: { skipIf?: () => boolean },
+    opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> },
   ): Promise<void> {
     return this.enqueue(async () => {
       const barrier = this.stopBarrier
@@ -216,6 +221,7 @@ class FakeE2B extends Service {
       if (existing?.sessionId === sessionId) {
         existing.world.killed = true
         this.accountSlots.delete(accountId)
+        await opts?.onStopped?.()
       }
       if (barrier?.afterDelete === true) {
         barrier.entered.resolve(undefined)
@@ -681,6 +687,7 @@ describe('E2B Executing Session over HTTP', () => {
     const password = 'correct-horse'
     const email = 'daily-cap@example.com'
     const jar = await signInAccount(harness, email, password)
+    const jarTab = await signInAccount(harness, email, password)
 
     const workspace = await rpc(harness, jar, 'workspace.create', { title: 'Cap' })
     const workspaceId = (workspace.body as {
@@ -722,11 +729,30 @@ describe('E2B Executing Session over HTTP', () => {
     expect((credentialLive.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
 
     nowMs += 60 * 60 * 1000
+    const liveAgain = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'still-live' }],
+    })
+    expect((liveAgain.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const liveTab = await rpc(harness, jarTab, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'tab' }],
+    })
+    expect((liveTab.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
     if (sessionAId !== undefined) idleGates.get(sessionAId)?.resolve(undefined)
     const e2b = context?.get('e2b')
     if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
     await expect.poll(() => e2b.hasLiveSlot()).toBe(false)
 
+    const exhaustedSame = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again-a' }],
+    })
+    expect(rpcError(exhaustedSame.body)).toBe('e2b-cap-exhausted')
     const exhausted = await rpc(harness, jar, 'session.prompt', {
       sessionId: sessionBId,
       mode: 'queue',
@@ -768,5 +794,63 @@ describe('E2B Executing Session over HTTP', () => {
     })
     expect((nextDay.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
     if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
+  })
+
+  it('charges a replacement Executing Session that starts in the previous stop window', {
+    timeout: 60_000,
+  }, async () => {
+    let nowMs = Date.parse('2026-04-01T10:00:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const harness = await boot()
+    const jar = await signInAccount(harness, 'race-cap@example.com', 'correct-horse')
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Race' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const sessionA = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionB = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionC = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionAId = sessionA.result?.value?.sessionId
+    const sessionBId = sessionB.result?.value?.sessionId
+    const sessionCId = sessionC.result?.value?.sessionId
+
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'a' }],
+    })).status).toBe(200)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    e2b.stopBarrier = {
+      entered: Promise.withResolvers<undefined>(),
+      hold: Promise.withResolvers<undefined>(),
+      afterDelete: false,
+    }
+    if (sessionAId !== undefined) idleGates.get(sessionAId)?.resolve(undefined)
+    await e2b.stopBarrier.entered.promise
+    e2b.startEnqueued = Promise.withResolvers<undefined>()
+    const promptBPromise = rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'b' }],
+    })
+    await e2b.startEnqueued.promise
+    e2b.stopBarrier.hold.resolve(undefined)
+    const promptB = await promptBPromise
+    expect((promptB.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs += 60 * 60 * 1000
+    if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
+    await expect.poll(() => e2b.hasLiveSlot()).toBe(false)
+    const exhausted = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionCId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'c' }],
+    })
+    expect(rpcError(exhausted.body)).toBe('e2b-cap-exhausted')
   })
 })

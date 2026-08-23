@@ -296,6 +296,48 @@ describe('E2BRuntime', () => {
     expect(second.kill).toHaveBeenCalledOnce()
   })
 
+  it('runs onCreated and onStopped on the Account chain for a new Executing Session', async () => {
+    const fixture = fakeSandbox('hook-1')
+    sdk.create.mockResolvedValue(fixture.sandbox)
+    const ctx = new Context()
+    const account = accountId('account-hooks')
+    const fiber = await ctx.plugin(E2BRuntime, { apiKey: 'test-key', perExecutingSession: true })
+    const order: string[] = []
+    const started = await ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: async () => { order.push('created') },
+    })
+    expect(started.reused).toBe(false)
+    expect(order).toEqual(['created'])
+    await ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: async () => { order.push('reused-created') },
+    })
+    expect(order).toEqual(['created'])
+    await ctx.e2b.stopExecutingSession(account, SessionId('s1'), {
+      onStopped: async () => { order.push('stopped') },
+    })
+    expect(order).toEqual(['created', 'stopped'])
+    expect(fixture.kill).toHaveBeenCalledOnce()
+    await ctx.e2b.stopExecutingSession(account, SessionId('s1'), {
+      onStopped: async () => { order.push('stopped-again') },
+    })
+    expect(order).toEqual(['created', 'stopped'])
+    await fiber.dispose()
+  })
+
+  it('kills a new sandbox when onCreated throws', async () => {
+    const fixture = fakeSandbox('hook-fail')
+    sdk.create.mockResolvedValue(fixture.sandbox)
+    const ctx = new Context()
+    const account = accountId('account-hooks-fail')
+    const fiber = await ctx.plugin(E2BRuntime, { apiKey: 'test-key', perExecutingSession: true })
+    await expect(ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: () => Promise.reject(new Error('begin failed')),
+    })).rejects.toThrow('begin failed')
+    expect(ctx.e2b.executingSessionId(account)).toBeUndefined()
+    expect(fixture.kill).toHaveBeenCalledOnce()
+    await fiber.dispose()
+  })
+
   it('routes getSandbox through the initiating Account and ignores a missing stop', async () => {
     const fixture = fakeSandbox()
     sdk.create.mockResolvedValue(fixture.sandbox)

@@ -1202,6 +1202,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     workspace: Workspace
     sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>['sandbox']
     reused: boolean
+    intervalStartedAt?: number
   }
 
   function addExecutingHold(rootId: SessionId): void {
@@ -1240,17 +1241,31 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   async function stopExecutingWorld(
-    account: AccountId,
-    sessionId: SessionId,
+    bind: ExecutingBind,
     opts?: { skipIf?: () => boolean },
   ): Promise<void> {
     const e2b = ctx.get('e2b')
-    /* v8 ignore next 2 -- Executing Session start already required e2b. */
-    if (e2b === undefined) return
-    const live = e2b.executingSandbox(account)
-    await e2b.stopExecutingSession(account, sessionId, opts)
-    if (e2b.executingSandbox(account) === live) return
-    await ctx.get('accounts')?.endExecutingWorld(account, Date.now())
+    const accounts = ctx.get('accounts')
+    const startedAt = bind.intervalStartedAt
+    const endInterval = async (): Promise<void> => {
+      if (startedAt === undefined || accounts === undefined) return
+      await accounts.endExecutingWorld(bind.account, startedAt, Date.now())
+    }
+    /* v8 ignore next 3 -- Executing Session start already required e2b. */
+    if (e2b === undefined) {
+      await endInterval()
+      return
+    }
+    let endedOnChain = false
+    await e2b.stopExecutingSession(bind.account, bind.rootId, {
+      ...opts?.skipIf === undefined ? {} : { skipIf: opts.skipIf },
+      onStopped: async () => {
+        endedOnChain = true
+        await endInterval()
+      },
+    })
+    if (e2b.executingSandbox(bind.account) === bind.sandbox) return
+    if (!endedOnChain) await endInterval()
   }
 
   /**
@@ -1296,8 +1311,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     addExecutingHold(rootId)
     let sandbox: ExecutingBind['sandbox']
     let reused: boolean
+    let intervalStartedAt: number | undefined
     try {
-      const started = await e2b.startExecutingSession(account, rootId)
+      const started = await e2b.startExecutingSession(account, rootId, {
+        onCreated: async () => {
+          const at = Date.now()
+          intervalStartedAt = at
+          await ctx.get('accounts')?.beginExecutingWorld(account, at)
+        },
+      })
       sandbox = started.sandbox
       reused = started.reused
     } catch (error: unknown) {
@@ -1313,23 +1335,24 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       }
       throw error
     }
+    const bind: ExecutingBind = {
+      account, rootId, workspace, sandbox, reused,
+      ...intervalStartedAt === undefined ? {} : { intervalStartedAt },
+    }
     try {
-      if (!reused) {
-        await ctx.get('accounts')?.beginExecutingWorld(account, Date.now())
-        await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
-      }
+      if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
     } catch (error: unknown) {
       releaseExecutingHold(rootId)
-      await stopExecutingWorld(account, rootId)
+      await stopExecutingWorld(bind)
       throw error
     }
-    return { bind: { account, rootId, workspace, sandbox, reused } }
+    return { bind }
   }
 
   async function abandonExecutingWorld(bind: ExecutingBind): Promise<void> {
     releaseExecutingHold(bind.rootId)
     if (bind.reused || executingCopyBack.has(bind.rootId) || familyBusy(bind.rootId)) return
-    await stopExecutingWorld(bind.account, bind.rootId, {
+    await stopExecutingWorld(bind, {
       skipIf: () => familyBusy(bind.rootId),
     })
   }
@@ -1346,7 +1369,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         for (;;) {
           await whenFamilyIdle(bind.rootId)
           if (familyBusy(bind.rootId)) continue
-          if (e2b.executingSandbox(bind.account) !== bind.sandbox) return
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+            await stopExecutingWorld(bind)
+            return
+          }
           try {
             await cloud.copyBackFrom(
               bind.account,
@@ -1368,8 +1394,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             )
           }
           if (familyBusy(bind.rootId)) continue
-          if (e2b.executingSandbox(bind.account) !== bind.sandbox) return
-          await stopExecutingWorld(bind.account, bind.rootId, {
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+            await stopExecutingWorld(bind)
+            return
+          }
+          await stopExecutingWorld(bind, {
             skipIf: () => familyBusy(bind.rootId),
           })
           if (familyBusy(bind.rootId)) continue
