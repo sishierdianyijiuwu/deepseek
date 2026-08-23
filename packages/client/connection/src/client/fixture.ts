@@ -2792,6 +2792,8 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         return ok(request, { archivedSessionIds: [...archivedSessionIds] })
       },
       write: request => ok(request, { written: true as const }),
+      listFiles: request => ok(request, { paths: [] }),
+      read: request => ok(request, { data: '' }),
     },
     agentPresets: {
       // Both trusts appear, because a surface must present a locally authored
@@ -3208,6 +3210,8 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
       case 'workspace.write': return this.api.workspace.write(request)
+      case 'workspace.listFiles': return this.api.workspace.listFiles(request)
+      case 'workspace.read': return this.api.workspace.read(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

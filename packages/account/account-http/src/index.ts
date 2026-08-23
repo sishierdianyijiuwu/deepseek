@@ -93,6 +93,40 @@ export async function handleAuth(
     writeJson(res, 200, { ok: true, frozen: await accounts.isRegistrationFrozen() })
     return
   }
+  if (url.pathname === '/auth/operator/account') {
+    if (method !== 'GET') {
+      res.writeHead(405, { allow: 'GET' })
+      res.end()
+      return
+    }
+    const operator = await requireOperator(req, res, accounts, cookieSecure)
+    if (operator === undefined) return
+    const email = url.searchParams.get('email') ?? ''
+    const found = await accounts.lookupByEmail(email)
+    if (found === undefined) {
+      writeJson(res, 200, failure('not_found', 'No Account for this email'))
+      return
+    }
+    writeJson(res, 200, {
+      ok: true,
+      accountId: found.accountId,
+      email: found.email,
+      verified: found.verified,
+      banned: found.banned,
+    })
+    return
+  }
+  if (url.pathname === '/auth/operator/audit') {
+    if (method !== 'GET') {
+      res.writeHead(405, { allow: 'GET' })
+      res.end()
+      return
+    }
+    const operator = await requireOperator(req, res, accounts, cookieSecure)
+    if (operator === undefined) return
+    writeJson(res, 200, { ok: true, items: await accounts.listOperatorAccess() })
+    return
+  }
   if (method !== 'POST') {
     res.writeHead(405, { allow: 'POST' })
     res.end()

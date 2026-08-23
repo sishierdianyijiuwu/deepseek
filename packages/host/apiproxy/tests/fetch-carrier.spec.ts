@@ -194,6 +194,12 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async write(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { written: true as const } } }
       },
+      async listFiles(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { paths: [] } } }
+      },
+      async read(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { data: '' } } }
+      },
     },
     agentPresets: {
       list(request: RpcRequest<{}>) {

@@ -72,6 +72,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   authorization: 'credentials.md',
   credentials: 'credentials.md',
   directoryPicker: 'workspace.md',
+  cloudWorkspaces: 'workspace.md',
   dynamicCordisRunner: 'extensions.md',
   e2b: 'subprocess.md',
   fileReferences: 'session-reference.md',
@@ -633,6 +634,11 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   SignInSessionId: 'Sign-in session identity is owned by packages/account/account/README.md',
   SignInLookup: 'Sign-in session lookup is owned by packages/account/account/README.md',
   ResetPasswordResult: 'password-reset outcome is owned by packages/account/account/README.md',
+  BanResult: 'Ban outcome is owned by packages/account/account/README.md',
+  AccountId: 'Account identity is owned by packages/account/account/README.md',
+  AccountLookup: 'Operator Account lookup is owned by packages/account/account/README.md',
+  OperatorAuditRecord: 'Operator-access audit row is owned by packages/account/account/README.md',
+  OperatorAuditWrite: 'Operator-access audit write is owned by packages/account/account/README.md',
   MailMessage: 'mailer payload is owned by packages/account/mailer/README.md',
 }
 

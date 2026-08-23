@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+import { accountId } from '@deepseek-ai/dsh-account'
 import { Mailer, type MailMessage } from '@deepseek-ai/dsh-mailer'
 import PostgresAccounts from '../src/index.ts'
 import { ensureSchema, SCHEMA_VERSION } from '../src/schema.ts'
@@ -44,7 +45,7 @@ describe('sql adapter', () => {
     const sql = await openSql('pglite:')
     await ensureSchema(sql)
     await ensureSchema(sql)
-    expect(SCHEMA_VERSION).toBe(3)
+    expect(SCHEMA_VERSION).toBe(4)
     const nested = await sql.transaction(async (inner) => {
       await inner.close()
       await inner.transaction(async nestedInner => nestedInner.query('SELECT 1 AS x'))
@@ -179,6 +180,46 @@ describe('postgres accounts', () => {
     expect(outcomes.sort()).toEqual(['invalid_or_expired', 'ok'])
     const winner = concurrent.find(row => row.ok)
     expect(winner).toBeDefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('looks up Accounts without Session bodies and appends Operator audit rows', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+      operatorEmails: ['ops@example.com'],
+    }).await()
+    const accounts = ctx.accounts
+    await accounts.register('user@example.com', 'password12')
+    const unverified = await accounts.lookupByEmail('user@example.com')
+    expect(unverified).toMatchObject({ email: 'user@example.com', verified: false, banned: false })
+    expect(unverified?.accountId).toEqual(expect.any(String))
+    const token = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(token).toBeDefined()
+    await accounts.verifyEmail(token!)
+    await expect(accounts.lookupByEmail('user@example.com')).resolves.toMatchObject({
+      email: 'user@example.com',
+      verified: true,
+      banned: false,
+    })
+    await accounts.ban('user@example.com')
+    const banned = await accounts.lookupByEmail('user@example.com')
+    expect(banned?.banned).toBe(true)
+    expect(await accounts.lookupById(banned!.accountId)).toEqual(banned)
+    await expect(accounts.lookupByEmail('missing@example.com')).resolves.toBeUndefined()
+
+    const recorded = await accounts.recordOperatorAccess({
+      operatorAccountId: accountId('ops-1'),
+      operatorEmail: 'ops@example.com',
+      targetAccountId: banned!.accountId,
+      sessionId: 'session-1',
+      openedAt: 1_700_000_000_000,
+    })
+    expect(recorded.id).toEqual(expect.any(String))
+    expect(await accounts.listOperatorAccess()).toEqual([recorded])
     await ctx.fiber.dispose()
   })
 

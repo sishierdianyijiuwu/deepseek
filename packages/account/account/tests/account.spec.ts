@@ -5,15 +5,18 @@ import {
   accountId,
   cookieValue,
   currentAccountId,
+  currentOperatorAccess,
   equalSecretHash,
   hashPassword,
   hashSecret,
   mintSecret,
   normalizeEmail,
   runWithAccount,
+  runWithOperatorAccess,
   SIGN_IN_COOKIE,
   signInSessionId,
   verifyPassword,
+  viewingAccountId,
 } from '../src/index.ts'
 import * as AccountInvariant from '../src/invariant.ts'
 
@@ -81,6 +84,32 @@ describe('request Account', () => {
     expect(seen).toBe('a1')
     expect(currentAccountId()).toBeUndefined()
     expect(runWithAccount(undefined, () => currentAccountId())).toBeUndefined()
+  })
+
+  it('keeps Operator access distinct from the signed-in Account', () => {
+    const operator = accountId('ops')
+    const target = accountId('user')
+    const seen = runWithOperatorAccess({
+      operatorAccountId: operator,
+      operatorEmail: 'ops@example.com',
+      targetAccountId: target,
+    }, () => ({
+      account: currentAccountId(),
+      viewing: viewingAccountId(),
+      access: currentOperatorAccess(),
+      nested: runWithAccount(operator, () => viewingAccountId()),
+    }))
+    expect(seen).toEqual({
+      account: operator,
+      viewing: target,
+      access: {
+        operatorAccountId: operator,
+        operatorEmail: 'ops@example.com',
+        targetAccountId: target,
+      },
+      nested: target,
+    })
+    expect(viewingAccountId()).toBeUndefined()
   })
 })
 

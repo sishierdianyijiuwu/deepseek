@@ -90,7 +90,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract register(email: string, password: string): Promise<RegisterResult>',
         description: 'Create an Unverified Account and send a verification message.',
         parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
-        returns: '`{ ok: true }` when the Unverified Account exists and the verification message was sent; `mail_failed` when the row exists but the mailer rejected the send.',
+        returns: '`{ ok: true }` when the Unverified Account exists and the verification message was sent; `mail_failed` when the row exists but the mailer rejected the send; `registration_frozen` when an Operator has disabled public registration.',
       },
       {
         signature: 'abstract verifyEmail(token: string): Promise<VerifyEmailResult>',
@@ -105,7 +105,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract signIn(email: string, password: string): Promise<SignInResult>',
-        description: 'Create a Sign-in session after a verified Account presents the Password. Unknown emails and wrong Passwords share one failure so the call cannot enumerate Accounts. An Unverified Account with the correct Password is a distinct failure.',
+        description: 'Create a Sign-in session after a verified Account presents the Password. Unknown emails and wrong Passwords share one failure so the call cannot enumerate Accounts. An Unverified Account with the correct Password is a distinct failure. A Banned Account with the correct Password is `banned`.',
         parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
         returns: 'a Sign-in session id on success.',
       },
@@ -118,7 +118,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>',
         description: 'Resolve a presented Sign-in session id to the owning Account. A live Sign-in session is slid forward by the configured lifetime.',
         parameters: [{ name: 'signInId', description: 'the id the browser presented.' }],
-        returns: 'the live Sign-in session, or `undefined` when it is unknown or expired.',
+        returns: 'the live Sign-in session, or `undefined` when it is unknown, expired, or the Account is Banned.',
       },
       {
         signature: 'abstract requestPasswordReset(email: string): Promise<void>',
@@ -127,9 +127,56 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract resetPassword(token: string, password: string): Promise<ResetPasswordResult>',
-        description: 'Consume a single-use password-reset token, set a new Password, and end every Sign-in session for that Account.',
+        description: 'Consume a single-use password-reset token, set a new Password, and end every Sign-in session for that Account. A Banned Account may still change the Password; `signIn` stays `banned` until the Ban is lifted.',
         parameters: [{ name: 'token', description: 'raw token from the password-reset URL.' }, { name: 'password', description: 'visitor-supplied new Password.' }],
         returns: 'whether the Password was changed.',
+      },
+      {
+        signature: 'abstract ban(email: string): Promise<BanResult>',
+        description: 'Ban an Account by email. Sign-in and live Sign-in sessions stop; the Account row remains. Idempotent when already Banned. HTTP Operator routes are the authorization check; this method does not consult the operator list.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: '`{ ok: true }` when the Account exists, or `not_found`.',
+      },
+      {
+        signature: 'abstract liftBan(email: string): Promise<BanResult>',
+        description: 'Lift a Ban. Idempotent when the Account is not Banned. Leftover Sign-in sessions for that Account end so a raced insert cannot become live.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: '`{ ok: true }` when the Account exists, or `not_found`.',
+      },
+      {
+        signature: 'abstract setRegistrationFrozen(frozen: boolean): Promise<void>',
+        description: 'Freeze or unfreeze public registration. Frozen `register` returns `registration_frozen` and does not insert a row.',
+        parameters: [{ name: 'frozen', description: 'whether new registration is refused.' }],
+      },
+      {
+        signature: 'abstract isRegistrationFrozen(): Promise<boolean>',
+        description: 'Whether public registration is frozen.',
+        parameters: [],
+        returns: 'true when `register` must return `registration_frozen`.',
+      },
+      {
+        signature: 'abstract lookupByEmail(email: string): Promise<AccountLookup | undefined>',
+        description: 'Look up an Account by email for Operator access. Returns existence, verified, and Ban flags with no Session bodies. Unknown emails are `undefined`. HTTP Operator routes are the authorization check.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: 'the summary, or `undefined` when no Account exists.',
+      },
+      {
+        signature: 'abstract lookupById(id: AccountId): Promise<AccountLookup | undefined>',
+        description: 'Look up an Account by id, including Banned Accounts. Used to stamp audit rows after email lookup has already authorized the opening.',
+        parameters: [{ name: 'id', description: 'opaque Account id.' }],
+        returns: 'the summary, or `undefined` when no Account exists.',
+      },
+      {
+        signature: 'abstract recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord>',
+        description: 'Append one Operator-access opening. HTTP Operator routes authorize; this method does not consult the operator list.',
+        parameters: [{ name: 'entry', description: 'Operator, target Account, optional Session, and time.' }],
+        returns: 'the persisted row including its id.',
+      },
+      {
+        signature: 'abstract listOperatorAccess(): Promise<OperatorAuditRecord[]>',
+        description: 'List Operator-access openings, newest first.',
+        parameters: [],
+        returns: 'every audit row.',
       },
     ],
   },
@@ -587,6 +634,65 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Fires after any flush that recomposed the graph (row added/removed, or a rebuilt rev change). Pull model: listeners re-read graph.',
         parameters: [{ name: 'listener', description: 'notified with no payload.' }],
         returns: 'the unsubscriber.',
+      },
+    ],
+  },
+  {
+    key: 'cloudWorkspaces',
+    summary: 'Cloud Workspace store (`ctx.cloudWorkspaces`).',
+    description: 'Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.',
+    methods: [
+      {
+        signature: 'owns(accountId: AccountId, workspaceId: WorkspaceId): boolean',
+        description: 'Whether `workspaceId` is a cloud Workspace owned by `accountId`.',
+        parameters: [{ name: 'accountId', description: 'signed-in Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'true when the in-memory ownership map agrees.',
+      },
+      {
+        signature: 'async createEmpty(accountId: AccountId, title?: string): Promise<Workspace>',
+        description: 'Create an empty Workspace directory for `accountId`.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'title', description: 'display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.' }],
+        returns: 'the registry Workspace after the PG row and directory exist.',
+      },
+      {
+        signature: 'listOwned(accountId: AccountId): Workspace[]',
+        description: 'Registry Workspaces this Account owns, in durable registry order.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'owned Workspaces that still exist in the registry.',
+      },
+      {
+        signature: 'getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined',
+        description: 'Look up one owned Workspace.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'the registry Workspace, or `undefined` when missing or not owned.',
+      },
+      {
+        signature: 'async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean>',
+        description: 'Delete an owned Workspace: PostgreSQL row, registry registration, and durable files. Waits for in-flight `writeFile` calls on this id, then removes the tree.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'true when a row was deleted.',
+      },
+      {
+        signature: 'async writeFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, data: Uint8Array, ): Promise<void>',
+        description: 'Write a file into an owned Workspace, refusing a tree past 1 GiB. Serialized with other writes and `deleteOwned` for the same id; a delete that already dropped the row fails as CloudWorkspaceNotFoundError.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'relativePath', description: 'file path inside the Workspace.' }, { name: 'data', description: 'bytes to write.' }],
+      },
+      {
+        signature: 'async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]>',
+        description: 'List regular files in an owned Workspace as POSIX-relative paths.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'sorted relative paths.',
+      },
+      {
+        signature: 'async readFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, ): Promise<Uint8Array>',
+        description: 'Read one contained file from an owned Workspace.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'relativePath', description: 'file path inside the Workspace.' }],
+        returns: 'file bytes.',
+      },
+      {
+        signature: 'async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void>',
+        description: 'Persist a new display title on the PostgreSQL row after the registry write.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'title', description: 'new title.' }],
       },
     ],
   },
@@ -2916,6 +3022,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type AccountId = Branded<\'AccountId\'>;',
   },
   {
+    name: 'AccountLookup',
+    declaration: 'export interface AccountLookup {\n    accountId: AccountId;\n    email: string;\n    verified: boolean;\n    banned: boolean;\n}',
+  },
+  {
     name: 'AdapterRegistrationHandle',
     declaration: 'export interface AdapterRegistrationHandle {\n    (): void;\n    replace(providers: string[]): void;\n}',
   },
@@ -3074,6 +3184,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'BackendRegistry',
     declaration: 'export class BackendRegistry {\n    register(name: string, backend: StorageBackend): () => void;\n    get(name: string): StorageBackend;\n    names(): string[];\n}',
+  },
+  {
+    name: 'BanResult',
+    declaration: 'export type BanResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'not_found\';\n};',
   },
   {
     name: 'BashEnvContributor',
@@ -3884,6 +3998,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
   },
   {
+    name: 'OperatorAuditRecord',
+    declaration: 'export interface OperatorAuditRecord {\n    id: string;\n    operatorAccountId: AccountId;\n    operatorEmail: string;\n    targetAccountId: AccountId;\n    sessionId?: string;\n    openedAt: number;\n}',
+  },
+  {
+    name: 'OperatorAuditWrite',
+    declaration: 'export type OperatorAuditWrite = Omit<OperatorAuditRecord, \'id\'>;',
+  },
+  {
     name: 'PermissionSelect',
     declaration: 'export interface PermissionSelect {\n    options: PresetOption[];\n    currentValue: string;\n}',
   },
@@ -3993,7 +4115,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RegisterResult',
-    declaration: 'export type RegisterResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'invalid_password\' | \'email_taken\' | \'mail_failed\';\n};',
+    declaration: 'export type RegisterResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'invalid_password\' | \'email_taken\' | \'mail_failed\' | \'registration_frozen\';\n};',
   },
   {
     name: 'ReplayEnvelope',
@@ -4065,7 +4187,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RpcErrorDetailsMap',
-    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset: string;\n    };\n    \'agent-preset-conflict\': {\n        sessionId: SessionId;\n        requestedPreset: string;\n        existingPreset?: string;\n    };\n    \'agent-preset-not-found\': {\n        agentPreset: string;\n      /* …truncated — full shape in source */',
+    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'workspace-required\': {};\n    \'workspace-limit\': {\n        max: number;\n    };\n    \'workspace-quota-exceeded\': {\n        maxBytes: number;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset: string;\n    };\n    \'agent-preset-conflict\': {\n        sessionId:  /* …truncated — full shape in source */',
   },
   {
     name: 'RpcId',
@@ -4461,11 +4583,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SignInLookup',
-    declaration: 'export interface SignInLookup {\n    accountId: AccountId;\n    email: string;\n    expiresAt: number;\n}',
+    declaration: 'export interface SignInLookup {\n    accountId: AccountId;\n    email: string;\n    expiresAt: number;\n    operator: boolean;\n}',
   },
   {
     name: 'SignInResult',
-    declaration: 'export type SignInResult = {\n    ok: true;\n    signInId: SignInSessionId;\n    expiresAt: number;\n} | {\n    ok: false;\n    error: \'invalid_credentials\' | \'unverified\';\n};',
+    declaration: 'export type SignInResult = {\n    ok: true;\n    signInId: SignInSessionId;\n    expiresAt: number;\n} | {\n    ok: false;\n    error: \'invalid_credentials\' | \'unverified\' | \'banned\';\n};',
   },
   {
     name: 'SignInSessionId',

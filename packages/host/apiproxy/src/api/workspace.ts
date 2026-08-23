@@ -122,4 +122,20 @@ export interface WorkspaceApi {
    */
   write(request: RpcRequest<{ workspaceId: WorkspaceId; path: string; data: string }>):
   Promise<RpcResponse<{ written: true }>>
+
+  /**
+   * List regular files in a cloud Workspace the viewer may read, as POSIX-relative
+   * paths. Unknown or other-Account ids fail with `workspace-not-found`.
+   */
+  listFiles(request: RpcRequest<{ workspaceId: WorkspaceId }>):
+  Promise<RpcResponse<{ paths: string[] }>>
+
+  /**
+   * Read one utf8 file from a cloud Workspace the viewer may read.
+   * A path that is not a file inside the Workspace fails with
+   * `workspace-invalid-path`. Unknown or other-Account ids fail with
+   * `workspace-not-found`.
+   */
+  read(request: RpcRequest<{ workspaceId: WorkspaceId; path: string }>):
+  Promise<RpcResponse<{ data: string }>>
 }

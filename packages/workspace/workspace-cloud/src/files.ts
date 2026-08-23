@@ -3,7 +3,7 @@
  * @module @deepseek-ai/dsh-workspace-cloud/src/files
  */
 
-import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** v1 cap: 1 GiB of file bytes per Workspace (ADR 0009). */
@@ -111,4 +111,58 @@ export async function writeWorkspaceFile(
   }
   await mkdir(dirname(full), { recursive: true })
   await writeFile(full, data)
+}
+
+/**
+ * List regular files under `root` as POSIX-relative paths. Symlinks are skipped.
+ * @param root - canonical Workspace directory.
+ * @returns sorted relative paths.
+ */
+export async function listWorkspaceFiles(root: string): Promise<string[]> {
+  const files: string[] = []
+  await collectWorkspaceFiles(root, '', files)
+  files.sort()
+  return files
+}
+
+/**
+ * Read one contained relative file.
+ * @param root - canonical Workspace directory.
+ * @param relativePath - file path inside the Workspace.
+ * @returns file bytes.
+ */
+export async function readWorkspaceFile(root: string, relativePath: string): Promise<Uint8Array> {
+  const full = resolveWorkspaceFile(root, relativePath)
+  let info
+  try {
+    info = await lstat(full)
+  } catch (error: unknown) {
+    if ((error as { code?: string }).code === 'ENOENT') {
+      throw new CloudWorkspacePathError(relativePath)
+    }
+    throw error
+  }
+  if (!info.isFile()) throw new CloudWorkspacePathError(relativePath)
+  return readFile(full)
+}
+
+async function collectWorkspaceFiles(dir: string, prefix: string, out: string[]): Promise<void> {
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch (error: unknown) {
+    const code = (error as { code?: string }).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return
+    throw error
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const relativePath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      await collectWorkspaceFiles(full, relativePath, out)
+      continue
+    }
+    if (entry.isFile()) out.push(relativePath)
+  }
 }

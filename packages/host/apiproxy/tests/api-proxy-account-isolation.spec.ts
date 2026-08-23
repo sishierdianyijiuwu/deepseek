@@ -6,8 +6,19 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { Accounts, accountId, runWithAccount } from '@deepseek-ai/dsh-account'
-import type { BanResult, RegisterResult, ResetPasswordResult, SignInLookup, SignInResult, SignInSessionId, VerifyEmailResult } from '@deepseek-ai/dsh-account'
+import { Accounts, accountId, runWithAccount, runWithOperatorAccess } from '@deepseek-ai/dsh-account'
+import type {
+  AccountLookup,
+  BanResult,
+  OperatorAuditRecord,
+  OperatorAuditWrite,
+  RegisterResult,
+  ResetPasswordResult,
+  SignInLookup,
+  SignInResult,
+  SignInSessionId,
+  VerifyEmailResult,
+} from '@deepseek-ai/dsh-account'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -20,6 +31,7 @@ import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 const sid = (id: string): SessionId => id as SessionId
 const accountA = accountId('account-a')
 const accountB = accountId('account-b')
+const auditLog: OperatorAuditWrite[] = []
 
 let nextRpc = 1
 function request<P>(payload: P): RpcRequest<P> {
@@ -63,9 +75,23 @@ class FakeAccounts extends Accounts {
   override isRegistrationFrozen(): Promise<boolean> {
     return Promise.resolve(false)
   }
+  override lookupByEmail(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override lookupById(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
+    auditLog.push(entry)
+    return Promise.resolve({ id: `audit-${String(auditLog.length)}`, ...entry })
+  }
+  override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
+    return Promise.resolve(auditLog.map((entry, index) => ({ id: `audit-${String(index + 1)}`, ...entry })))
+  }
 }
 
 async function harness(): Promise<{ ctx: Context; api: ApiProxy }> {
+  auditLog.length = 0
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(UserQuestionService)
@@ -196,4 +222,102 @@ describe('Account-owned Sessions', () => {
     if (history.result.ok) throw new Error('unowned history must fail')
     expect(history.result.error.code).toBe('session-not-found')
   })
+
+  it('lets Operator access read another Account and refuses prompt', async () => {
+    const { ctx, api } = await harness()
+    const created = await runWithAccount(accountA, () => api.sessions.create(request({})))
+    expect(created.result.ok).toBe(true)
+    if (!created.result.ok) throw new Error('create failed')
+    const sessionId = created.result.value.sessionId
+    const access = {
+      operatorAccountId: accountB,
+      operatorEmail: 'ops@example.com',
+      targetAccountId: accountA,
+    }
+
+    const listed = await runWithOperatorAccess(access, () => api.sessions.list(request({})))
+    expect(listed.result.ok).toBe(true)
+    if (!listed.result.ok) throw new Error('operator list failed')
+    expect(listed.result.value.items.map(item => item.sessionId)).toEqual([sessionId])
+
+    const history = await runWithOperatorAccess(access, () => api.sessions.history(request({ sessionId })))
+    expect(history.result.ok).toBe(true)
+
+    const prompt = await runWithOperatorAccess(access, () => api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'hi' }],
+    })))
+    expect(prompt.result.ok).toBe(false)
+    if (prompt.result.ok) throw new Error('operator prompt must fail')
+    expect(prompt.result.error.code).toBe('operator-access-readonly')
+
+    const credentials = await runWithOperatorAccess(access, () => api.credentials.describe(request({
+      refs: ['DEEPSEEK_API_KEY'],
+    })))
+    expect(credentials.result.ok).toBe(false)
+    if (credentials.result.ok) throw new Error('operator credential read must fail')
+    expect(credentials.result.error.code).toBe('operator-access-readonly')
+
+    const respond = await runWithOperatorAccess(access, () => api.respond({
+      type: 'client-response',
+      rpcId: request({}).rpcId,
+      result: { ok: true, value: {} },
+    }))
+    expect(respond).toEqual({ accepted: false, reason: 'not-pending' })
+
+    expect(rpcError((await runWithOperatorAccess(access, () => api.goals.create(request({
+      sessionId,
+      objective: 'inspect',
+    })))).result)).toBe('operator-access-readonly')
+    expect(rpcError((await runWithOperatorAccess(access, () => api.agentPresets.select(request({
+      sessionId,
+      agentPreset: 'default',
+    })))).result)).toBe('operator-access-readonly')
+
+    const childId = sid('op-child')
+    ctx.sessions.create(childId, {
+      meta: { cwd: '/tmp', owner: accountA, origin: 'subagent', parentSession: sessionId },
+    })
+    ctx.provide('subagents', {
+      listChildren: () => Promise.resolve([{
+        kind: 'child',
+        id: childId,
+        mode: 'one-shot',
+        hasChildren: false,
+        activity: 'inactive',
+      }]),
+    } as never)
+    const subHistory = await runWithOperatorAccess(access, () => api.subagents.history(request({
+      parentSessionId: sessionId,
+      childSessionId: childId,
+      mode: 'one-shot' as const,
+    }), new AbortController().signal))
+    expect(subHistory.result.ok).toBe(true)
+    expect(auditLog.some(entry => entry.sessionId === childId)).toBe(true)
+
+    const coldId = sid('cold-export')
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([{ id: coldId, owner: accountA, cwd: '/tmp', createdAt: 1, version: 0 }]),
+      supportsRawArtifacts: true,
+      readRaw: () => Promise.resolve({
+        meta: { id: coldId, owner: accountA, cwd: '/tmp', createdAt: 1, version: 0 },
+        filename: 'session.jsonl',
+        content: '{}\n',
+      }),
+    } as never)
+    ctx.provide('sessionQuery', {
+      traceSession: () => Promise.resolve({ ancestors: [], descendants: [] }),
+    } as never)
+    ctx.provide('attachments', {} as never)
+    await runWithOperatorAccess(access, () => api.downloads.sessionLog(
+      { sessionId: coldId },
+      new AbortController().signal,
+    ))
+    expect(auditLog.some(entry => entry.sessionId === coldId)).toBe(true)
+  })
 })
+
+function rpcError(result: { ok?: boolean; error?: { code: string } } | undefined): string | undefined {
+  return result?.error?.code
+}

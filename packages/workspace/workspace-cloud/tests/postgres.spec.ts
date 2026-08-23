@@ -79,6 +79,9 @@ describe('CloudWorkspaces', () => {
 
     await cloud.writeFile(owner, first.id, 'readme.txt', Buffer.from('hi'))
     expect(await readFile(join(first.path, 'readme.txt'), 'utf8')).toBe('hi')
+    expect(await cloud.listFiles(owner, first.id)).toEqual(['readme.txt'])
+    expect(Buffer.from(await cloud.readFile(owner, first.id, 'readme.txt')).toString()).toBe('hi')
+    await expect(cloud.readFile(other, first.id, 'readme.txt')).rejects.toBeInstanceOf(CloudWorkspaceNotFoundError)
 
     const third = await cloud.createEmpty(owner, 'Third')
     expect(cloud.listOwned(owner)).toHaveLength(MAX_WORKSPACES_PER_ACCOUNT)

@@ -48,6 +48,50 @@ export interface SignInLookup {
   operator: boolean
 }
 
+/** Existence, verified, and Ban flags for Operator lookup. No Session bodies. */
+export interface AccountLookup {
+  /** Opaque Account id. */
+  accountId: AccountId
+  /** Normalized email. */
+  email: string
+  /** True when email verification has completed. */
+  verified: boolean
+  /** True when Ban is in effect. */
+  banned: boolean
+}
+
+/**
+ * One Operator-access opening. `sessionId` is absent when the opening is the
+ * Account (list/mux/Workspace files) rather than one Session log.
+ */
+export interface OperatorAuditRecord {
+  /** Opaque row id. */
+  id: string
+  /** Operator who opened. */
+  operatorAccountId: AccountId
+  /** Operator email at the opening. */
+  operatorEmail: string
+  /** Account that was opened. */
+  targetAccountId: AccountId
+  /** Session id when this opening is a Session log. */
+  sessionId?: string
+  /** Epoch-ms instant of the opening. */
+  openedAt: number
+}
+
+/** Fields {@link import('./index.ts').Accounts.recordOperatorAccess} persists. */
+export type OperatorAuditWrite = Omit<OperatorAuditRecord, 'id'>
+
+/** Active Operator access bound for one `/api` request or WebSocket. */
+export interface OperatorAccess {
+  /** Signed-in Operator Account. */
+  operatorAccountId: AccountId
+  /** Operator email used on the audit row. */
+  operatorEmail: string
+  /** Account whose Sessions and Workspace files are visible read-only. */
+  targetAccountId: AccountId
+}
+
 /** A verification message the mailer delivers. */
 export interface VerificationMail {
   /** Recipient email. */

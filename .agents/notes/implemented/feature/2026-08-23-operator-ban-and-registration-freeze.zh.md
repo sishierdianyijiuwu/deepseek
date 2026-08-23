@@ -25,7 +25,7 @@ HTTP Operator 路由落在现有鉴权 Consumer 上、`/api` 旁边：
 | POST | `/auth/operator/freeze-registration` |
 | GET | `/auth/operator/registration` |
 
-它们要求有效 Sign-in session 且 `operator: true`。未认证调用方和普通 Account 在 HTTP 200 收到 `{ ok: false, error: { code: 'forbidden' } }`。这些路由不读取 Session 日志。schema 版本为 `SCHEMA_VERSION = 3`。
+它们要求有效 Sign-in session 且 `operator: true`。未认证调用方和普通 Account 在 HTTP 200 收到 `{ ok: false, error: { code: 'forbidden' } }`。这些路由不读取 Session 日志。schema 版本为 `SCHEMA_VERSION = 4`（审计列见 [Operator 只读访问](2026-08-23-operator-readonly-audit.zh.md)）。
 
 ## 曾考虑的替代方案
 
@@ -47,4 +47,4 @@ HTTP Operator 路由落在现有鉴权 Consumer 上、`/api` 旁边：
 
 ## 后果
 
-Operator 可以 Ban 和冻结，而无需 Operator Session 访问（后续工单），也无需 Deletion。空的 `DSH_OPERATOR_EMAILS` 使宿主没有任何 Operator。若 Ban 针对仅剩的 Operator 邮箱，该 Operator 会被锁在外面，直到修改环境列表并编辑数据库才能恢复。
+Operator 可以 Ban 和冻结，而无需 Deletion。Operator Session 访问是另一项决策（[Operator 只读访问](2026-08-23-operator-readonly-audit.zh.md)）。空的 `DSH_OPERATOR_EMAILS` 使宿主没有任何 Operator。若 Ban 针对仅剩的 Operator 邮箱，该 Operator 会被锁在外面，直到修改环境列表并编辑数据库才能恢复。

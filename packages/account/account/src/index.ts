@@ -8,7 +8,10 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {
   AccountId,
+  AccountLookup,
   BanResult,
+  OperatorAuditRecord,
+  OperatorAuditWrite,
   RegisterResult,
   ResetPasswordResult,
   SignInLookup,
@@ -20,10 +23,23 @@ import type {
 export { hashPassword, verifyPassword } from './password.ts'
 export { equalSecretHash, hashSecret, mintSecret } from './secret.ts'
 export { normalizeEmail } from './email.ts'
-export { SIGN_IN_COOKIE, cookieValue, currentAccountId, runWithAccount } from './request.ts'
+export {
+  SIGN_IN_COOKIE,
+  OPERATOR_ACCESS_HEADER,
+  cookieValue,
+  currentAccountId,
+  currentOperatorAccess,
+  viewingAccountId,
+  runWithAccount,
+  runWithOperatorAccess,
+} from './request.ts'
 export type {
   AccountId,
+  AccountLookup,
   BanResult,
+  OperatorAccess,
+  OperatorAuditRecord,
+  OperatorAuditWrite,
   PasswordResetMail,
   RegisterResult,
   ResetPasswordResult,
@@ -167,6 +183,37 @@ export abstract class Accounts extends Service {
    * @returns true when `register` must return `registration_frozen`.
    */
   abstract isRegistrationFrozen(): Promise<boolean>
+
+  /**
+   * Look up an Account by email for Operator access. Returns existence,
+   * verified, and Ban flags with no Session bodies. Unknown emails are
+   * `undefined`. HTTP Operator routes are the authorization check.
+   * @param email - target Account email.
+   * @returns the summary, or `undefined` when no Account exists.
+   */
+  abstract lookupByEmail(email: string): Promise<AccountLookup | undefined>
+
+  /**
+   * Look up an Account by id, including Banned Accounts. Used to stamp
+   * audit rows after email lookup has already authorized the opening.
+   * @param id - opaque Account id.
+   * @returns the summary, or `undefined` when no Account exists.
+   */
+  abstract lookupById(id: AccountId): Promise<AccountLookup | undefined>
+
+  /**
+   * Append one Operator-access opening. HTTP Operator routes authorize;
+   * this method does not consult the operator list.
+   * @param entry - Operator, target Account, optional Session, and time.
+   * @returns the persisted row including its id.
+   */
+  abstract recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord>
+
+  /**
+   * List Operator-access openings, newest first.
+   * @returns every audit row.
+   */
+  abstract listOperatorAccess(): Promise<OperatorAuditRecord[]>
 }
 
 export default Accounts
