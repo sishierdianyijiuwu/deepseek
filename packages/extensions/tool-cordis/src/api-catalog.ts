@@ -82,6 +82,58 @@ export interface TypeApiEntry {
 /** Every harness `ctx.<key>` service, sorted by key. */
 export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
+    key: 'accounts',
+    summary: 'Abstract Account service.',
+    description: 'Abstract Account service. Subclass, implement the methods, and load the subclass as a plugin — it registers as `ctx.accounts`.',
+    methods: [
+      {
+        signature: 'abstract register(email: string, password: string): Promise<RegisterResult>',
+        description: 'Create an Unverified Account and send a verification message.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
+        returns: '`{ ok: true }` when the Unverified Account exists and the verification message was sent; `mail_failed` when the row exists but the mailer rejected the send.',
+      },
+      {
+        signature: 'abstract verifyEmail(token: string): Promise<VerifyEmailResult>',
+        description: 'Consume a single-use verification token from the mailbox link.',
+        parameters: [{ name: 'token', description: 'raw token from the verification URL.' }],
+        returns: 'whether the Account is now verified.',
+      },
+      {
+        signature: 'abstract resendVerification(email: string): Promise<void>',
+        description: 'Send a fresh verification message when the email belongs to an Unverified Account. Unknown or already-verified addresses are a silent success so the call cannot enumerate Accounts.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }],
+      },
+      {
+        signature: 'abstract signIn(email: string, password: string): Promise<SignInResult>',
+        description: 'Create a Sign-in session after a verified Account presents the Password. Unknown emails and wrong Passwords share one failure so the call cannot enumerate Accounts. An Unverified Account with the correct Password is a distinct failure.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
+        returns: 'a Sign-in session id on success.',
+      },
+      {
+        signature: 'abstract signOut(signInId: SignInSessionId): Promise<void>',
+        description: 'End one Sign-in session. Unknown ids are a no-op.',
+        parameters: [{ name: 'signInId', description: 'the id the browser presented.' }],
+      },
+      {
+        signature: 'abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>',
+        description: 'Resolve a presented Sign-in session id to the owning Account. A live Sign-in session is slid forward by the configured lifetime.',
+        parameters: [{ name: 'signInId', description: 'the id the browser presented.' }],
+        returns: 'the live Sign-in session, or `undefined` when it is unknown or expired.',
+      },
+      {
+        signature: 'abstract requestPasswordReset(email: string): Promise<void>',
+        description: 'Send a password-reset message when the email belongs to a verified Account. Unknown or Unverified addresses are a silent success so the call cannot enumerate Accounts.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }],
+      },
+      {
+        signature: 'abstract resetPassword(token: string, password: string): Promise<ResetPasswordResult>',
+        description: 'Consume a single-use password-reset token, set a new Password, and end every Sign-in session for that Account.',
+        parameters: [{ name: 'token', description: 'raw token from the password-reset URL.' }, { name: 'password', description: 'visitor-supplied new Password.' }],
+        returns: 'whether the Password was changed.',
+      },
+    ],
+  },
+  {
     key: 'agentDefaultModel',
     summary: 'Owns the default model selection independently of any Host or transport.',
     description: 'Owns the default model selection independently of any Host or transport. The composition entry remains usable without a settings provider; when one is mounted, its user layer is read live.',
@@ -665,6 +717,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'every stored record, values excluded.',
       },
       {
+        signature: 'hasStoredSecret(): Promise<boolean>',
+        description: 'Whether any secret is stored for this operation\'s caller. Hosted `session.prompt` and `subagent.prompt` refuse when this is false so an Account with no Credential can still sign in. The default answers from listRecords only; providers that store references implement the reference half too.',
+        parameters: [],
+        returns: 'true when a later {@link resolve} or {@link readRecord} would observe a stored secret.',
+      },
+      {
         signature: 'abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>, ): Promise<CredentialRecord | undefined>',
         description: 'Serialized read-modify-write over one record — the only write path. `mutate` sees the record as it stands at the moment the write is exclusive, and returning `undefined` leaves the entry untouched. Exclusion holds across processes where the backing store supports it, which is what makes a token refresh safe: two processes rotating one refresh token concurrently would otherwise lose whichever wrote first.',
         parameters: [{ name: 'key', description: 'the record to modify.' }, { name: 'mutate', description: 'receives the current record and returns its replacement, or `undefined` to leave it.' }],
@@ -1049,6 +1107,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Select a provider by the file\'s extension and run one query. Selection is per-query and order-independent; no match throws `LspError` `LSP_UNAVAILABLE`.',
         parameters: [{ name: 'request', description: 'the normalized query.' }, { name: 'signal', description: 'optional cancellation forwarded to the selected provider.' }],
         returns: 'the normalized, closed-union result.',
+      },
+    ],
+  },
+  {
+    key: 'mailer',
+    summary: 'Abstract mailer.',
+    description: 'Abstract mailer. Subclass and load the subclass as a plugin — it registers as `ctx.mailer`.',
+    methods: [
+      {
+        signature: 'abstract send(message: MailMessage): Promise<void>',
+        description: 'Deliver one message.',
+        parameters: [{ name: 'message', description: 'recipient, subject, and plain-text body.' }],
       },
     ],
   },
@@ -2842,6 +2912,10 @@ export const EVENT_API: readonly EventApiEntry[] = [
 /** Shapes of every exported type the Service and Event signatures reference (transitively), sorted by name. */
 export const TYPE_API: readonly TypeApiEntry[] = [
   {
+    name: 'AccountId',
+    declaration: 'export type AccountId = Branded<\'AccountId\'>;',
+  },
+  {
     name: 'AdapterRegistrationHandle',
     declaration: 'export interface AdapterRegistrationHandle {\n    (): void;\n    replace(providers: string[]): void;\n}',
   },
@@ -3183,7 +3257,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CreateAgentOptions',
-    declaration: 'export interface CreateAgentOptions {\n    readonly sessionId: SessionId;\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n    readonly seed?: readonly SessionEvent[];\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
+    declaration: 'export interface CreateAgentOptions {\n    readonly sessionId: SessionId;\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n        readonly owner?: SessionOwnerId;\n    };\n    readonly seed?: readonly SessionEvent[];\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
   },
   {
     name: 'CreateGoalRequest',
@@ -3195,7 +3269,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CreateSessionOptions',
-    declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n}',
+    declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n        readonly owner?: SessionOwnerId;\n    };\n}',
   },
   {
     name: 'CreateTeamTaskRequest',
@@ -3690,6 +3764,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
   },
   {
+    name: 'MailMessage',
+    declaration: 'export interface MailMessage {\n    to: string;\n    subject: string;\n    text: string;\n}',
+  },
+  {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
@@ -3914,6 +3992,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
   },
   {
+    name: 'RegisterResult',
+    declaration: 'export type RegisterResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'invalid_password\' | \'email_taken\' | \'mail_failed\';\n};',
+  },
+  {
     name: 'ReplayEnvelope',
     declaration: 'export interface ReplayEnvelope {\n    response: unknown;\n    blocks?: readonly unknown[];\n}',
   },
@@ -3936,6 +4018,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RequestRunOutcome',
     declaration: 'export type RequestRunOutcome = \'approved\' | \'completed\' | \'rejected\' | \'cancelled\' | \'failed\';',
+  },
+  {
+    name: 'ResetPasswordResult',
+    declaration: 'export type ResetPasswordResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_or_expired\' | \'invalid_password\';\n};',
   },
   {
     name: 'ResolvedAlwaysRetryPolicy',
@@ -4147,7 +4233,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionHeader',
-    declaration: 'export interface SessionHeader {\n    readonly version: number;\n    readonly id: SessionId;\n    readonly createdAt: number;\n    readonly cwd?: string;\n    readonly parentSession?: SessionId;\n    readonly seedLength?: number;\n    readonly origin?: \'subagent\';\n    readonly delegationDepth?: number;\n    readonly agentPreset?: string;\n}',
+    declaration: 'export interface SessionHeader {\n    readonly version: number;\n    readonly id: SessionId;\n    readonly createdAt: number;\n    readonly cwd?: string;\n    readonly parentSession?: SessionId;\n    readonly seedLength?: number;\n    readonly origin?: \'subagent\';\n    readonly delegationDepth?: number;\n    readonly agentPreset?: string;\n    readonly owner?: SessionOwnerId;\n}',
   },
   {
     name: 'SessionId',
@@ -4172,6 +4258,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionLogSnapshot',
     declaration: 'export interface SessionLogSnapshot {\n    session: SessionHeader;\n    events: SessionEvent[];\n}',
+  },
+  {
+    name: 'SessionOwnerId',
+    declaration: 'export type SessionOwnerId = Branded<\'AccountId\'>;',
   },
   {
     name: 'SessionPersistenceRevision',
@@ -4368,6 +4458,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ShellSandboxInfo',
     declaration: 'export interface ShellSandboxInfo {\n    mode: SandboxMode;\n    denied: boolean;\n    enforcement?: SandboxEnforcement;\n    runnerFailed?: boolean;\n}',
+  },
+  {
+    name: 'SignInLookup',
+    declaration: 'export interface SignInLookup {\n    accountId: AccountId;\n    email: string;\n    expiresAt: number;\n}',
+  },
+  {
+    name: 'SignInResult',
+    declaration: 'export type SignInResult = {\n    ok: true;\n    signInId: SignInSessionId;\n    expiresAt: number;\n} | {\n    ok: false;\n    error: \'invalid_credentials\' | \'unverified\';\n};',
+  },
+  {
+    name: 'SignInSessionId',
+    declaration: 'export type SignInSessionId = Branded<\'SignInSessionId\'>;',
   },
   {
     name: 'SkillCandidate',
@@ -4936,6 +5038,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UserQuestionProvider',
     declaration: 'export interface UserQuestionProvider {\n    ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>;\n}',
+  },
+  {
+    name: 'VerifyEmailResult',
+    declaration: 'export type VerifyEmailResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_or_expired\';\n};',
   },
   {
     name: 'WebBootEntry',

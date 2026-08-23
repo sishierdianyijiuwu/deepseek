@@ -65,6 +65,7 @@ describe('layering and reads', () => {
     const ctx = await boot({ path: join(dir, '.credentials.yaml'), watch: false })
     expect(await ctx.credentials.resolve(KEY)).toBeUndefined()
     expect(await ctx.credentials.describe(KEY)).toEqual({ configured: false, writable: true })
+    expect(await ctx.credentials.hasStoredSecret()).toBe(false)
   })
 
   it('serves file entries alongside comments and quoted values', async () => {
@@ -75,6 +76,7 @@ describe('layering and reads', () => {
     expect(await ctx.credentials.resolve(KEY)).toEqual({ value: 'plain', source: 'file' })
     expect(await ctx.credentials.resolve(OTHER)).toEqual({ value: 'with space', source: 'file' })
     expect(await ctx.credentials.describe(KEY)).toEqual({ configured: true, source: 'file', writable: true })
+    expect(await ctx.credentials.hasStoredSecret()).toBe(true)
   })
 
   it('lets a non-empty process environment win read-only over the file', async () => {

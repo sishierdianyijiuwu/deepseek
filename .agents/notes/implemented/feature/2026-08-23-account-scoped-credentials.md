@@ -14,7 +14,7 @@ The hosted bundle replaces the `credentials` row with `dsh-credentials-account`.
 
 When `ctx.accounts` is composed, `credentials.describe` / `set` / `unset` are not loopback-pinned; the Sign-in session that `/api` already requires is the authorization. Local `dsh web` without Accounts keeps the loopback pin.
 
-Hosted `session.prompt` refuses with `credential-missing` after Session visibility, when `hasStoredSecret()` is false. Sign-in, `/auth/me`, and `session.list` / `session.create` still work.
+Hosted `session.prompt` and `subagent.prompt` refuse with `credential-missing` after Session visibility, when `hasStoredSecret()` is false. Sign-in, `/auth/me`, and `session.list` / `session.create` still work.
 
 ## Alternatives considered
 
@@ -30,4 +30,4 @@ HTTP tests with two cookie jars are the source of truth. Workspaces, Ban, and Op
 
 ## Required verification
 
-HTTP: two jars isolate `credentials.describe` / `set`; a jar with no Credential can sign in, list, and create a Session, and `session.prompt` is `credential-missing` until that jar saves a Credential, after which the same prompt is not `credential-missing`. Connection: with Accounts composed, `credentials.*` on a trusted host is 401 without a cookie and not 403 with one; `settings.describe` stays 403.
+HTTP: two jars isolate `credentials.describe` / `set`; a jar with no Credential can sign in, list, and create a Session, and `session.prompt` / `subagent.prompt` are `credential-missing` until that jar saves a Credential, after which the same prompt is not `credential-missing`. Connection: with Accounts composed, `credentials.*` on a trusted host is 401 without a cookie and not 403 with one; `settings.describe` stays 403.

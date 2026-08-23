@@ -242,9 +242,10 @@ export abstract class CredentialProvider extends Service {
 
   /**
    * Whether any secret is stored for this operation's caller. Hosted
-   * `session.prompt` refuses when this is false so an Account with no
-   * Credential can still sign in. The default answers from {@link listRecords}
-   * only; providers that store references implement the reference half too.
+   * `session.prompt` and `subagent.prompt` refuse when this is false so an
+   * Account with no Credential can still sign in. The default answers from
+   * {@link listRecords} only; providers that store references implement the
+   * reference half too.
    * @returns true when a later {@link resolve} or {@link readRecord} would
    *   observe a stored secret.
    */

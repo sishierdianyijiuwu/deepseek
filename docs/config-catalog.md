@@ -23,7 +23,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/account/account-http/src/index.ts:20`](../packages/account/account-http/src/index.ts)
+Source: [`packages/account/account-http/src/index.ts:19`](../packages/account/account-http/src/index.ts)
 
 <a id="deepseek-aidsh-account-postgres"></a>
 
@@ -463,7 +463,7 @@ export interface ConnectionConfig {
 }
 ```
 
-Source: [`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+Source: [`packages/client/connection/src/index.ts:59`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -599,6 +599,22 @@ export interface Config {
 ```
 
 Source: [`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/extensions/cordis-host-runner/src/index.ts)
+
+<a id="deepseek-aidsh-credentials-account"></a>
+
+## `@deepseek-ai/dsh-credentials-account`
+
+Requires: `accounts`
+
+```ts config-catalog
+/** Plugin config: storage location. */
+export interface Config {
+  /** Harness home used when resolving the credentials directory; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
+}
+```
+
+Source: [`packages/credentials/credentials-account/src/index.ts:43`](../packages/credentials/credentials-account/src/index.ts)
 
 <a id="deepseek-aidsh-credentials-local"></a>
 

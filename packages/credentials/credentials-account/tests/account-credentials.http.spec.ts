@@ -270,6 +270,14 @@ describe('Account-scoped Credentials over HTTP', () => {
     expect(missing.status).toBe(200)
     expect(rpcError(missing.body)).toBe('credential-missing')
 
+    const subMissing = await rpc(harness, jarA, 'subagent.prompt', {
+      parentSessionId: sessionId,
+      childSessionId: sessionId,
+      mode: 'continuable',
+      content: [{ type: 'text', text: 'hi' }],
+    })
+    expect(rpcError(subMissing.body)).toBe('credential-missing')
+
     expect(credentialView((await rpc(harness, jarA, 'credentials.describe', {
       refs: ['DEEPSEEK_API_KEY'],
     })).body, 'DEEPSEEK_API_KEY')).toMatchObject({ configured: false })

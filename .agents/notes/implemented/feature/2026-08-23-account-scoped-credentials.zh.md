@@ -14,7 +14,7 @@ Status: implemented
 
 当组合了 `ctx.accounts` 时，`credentials.describe`／`set`／`unset` 不再钉在 loopback；`/api` 已经要求的 Sign-in session 就是授权。不含 Accounts 的本地 `dsh web` 仍钉 loopback。
 
-托管 `session.prompt` 在 Session 可见性检查之后，若 `hasStoredSecret()` 为 false，以 `credential-missing` 拒绝。登录、`/auth/me` 以及 `session.list`／`session.create` 仍可用。
+托管 `session.prompt` 与 `subagent.prompt` 在 Session 可见性检查之后，若 `hasStoredSecret()` 为 false，以 `credential-missing` 拒绝。登录、`/auth/me` 以及 `session.list`／`session.create` 仍可用。
 
 ## 曾考虑的替代方案
 
@@ -30,4 +30,4 @@ Status: implemented
 
 ## 必要验证
 
-HTTP：两个 jar 隔离 `credentials.describe`／`set`；没有 Credential 的 jar 仍可登录、列出并创建 Session，且 `session.prompt` 在该 jar 保存 Credential 之前为 `credential-missing`，之后不再是。Connection：组合了 Accounts 时，受信任 host 上的 `credentials.*` 在无 cookie 时为 401、有 cookie 时不是 403；`settings.describe` 仍为 403。
+HTTP：两个 jar 隔离 `credentials.describe`／`set`；没有 Credential 的 jar 仍可登录、列出并创建 Session，且 `session.prompt`／`subagent.prompt` 在该 jar 保存 Credential 之前为 `credential-missing`，之后不再是。Connection：组合了 Accounts 时，受信任 host 上的 `credentials.*` 在无 cookie 时为 401、有 cookie 时不是 403；`settings.describe` 仍为 403。

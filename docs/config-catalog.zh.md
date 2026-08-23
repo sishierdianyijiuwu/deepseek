@@ -602,6 +602,22 @@ export interface Config {
 
 来源：[`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/extensions/cordis-host-runner/src/index.ts)
 
+<a id="deepseek-aidsh-credentials-account"></a>
+
+## `@deepseek-ai/dsh-credentials-account`
+
+Requires: `accounts`
+
+```ts config-catalog
+/** Plugin config: storage location. */
+export interface Config {
+  /** Harness home used when resolving the credentials directory; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
+}
+```
+
+来源：[`packages/credentials/credentials-account/src/index.ts:43`](../packages/credentials/credentials-account/src/index.ts)
+
 <a id="deepseek-aidsh-credentials-local"></a>
 
 ## `@deepseek-ai/dsh-credentials-local`

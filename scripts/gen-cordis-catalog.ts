@@ -59,6 +59,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   agentPresets: 'core.md',
   agents: 'core.md',
   apiProxy: 'typert.md',
+  accounts: 'account.md',
   approval: 'approval.md',
   attachments: 'attachment.md',
   shell: 'shell.md',
@@ -78,6 +79,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   goals: 'goal.md',
   webServer: 'web-server.md',
   invariants: 'invariants.md',
+  mailer: 'account.md',
   llm: 'llm-streaming.md',
   lsp: 'lsp.md',
   messageFeedback: 'feedback.md',
@@ -625,6 +627,13 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  RegisterResult: 'Account registration outcome is owned by packages/account/account/README.md',
+  VerifyEmailResult: 'email-verification outcome is owned by packages/account/account/README.md',
+  SignInResult: 'Sign-in outcome is owned by packages/account/account/README.md',
+  SignInSessionId: 'Sign-in session identity is owned by packages/account/account/README.md',
+  SignInLookup: 'Sign-in session lookup is owned by packages/account/account/README.md',
+  ResetPasswordResult: 'password-reset outcome is owned by packages/account/account/README.md',
+  MailMessage: 'mailer payload is owned by packages/account/mailer/README.md',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */
