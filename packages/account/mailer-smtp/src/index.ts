@@ -10,6 +10,9 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { Mailer, type MailMessage } from '@deepseek-ai/dsh-mailer'
 
+/** Default I/O deadline for one SMTP send. */
+export const DEFAULT_SMTP_TIMEOUT_MS = 15_000
+
 /** Plugin config: SMTP transport. Missing host or from fails at load. */
 export interface Config {
   /** SMTP server hostname. */
@@ -24,6 +27,10 @@ export interface Config {
   username?: string
   /** SMTP AUTH password, when the server requires it. */
   password?: string
+  /** Allow AUTH PLAIN on a socket that is not TLS. Defaults to false. */
+  allowPlaintextAuth?: boolean
+  /** Deadline in milliseconds for one send, including connect. */
+  timeoutMs?: number
 }
 
 /**
@@ -37,16 +44,11 @@ export class SmtpMailer extends Mailer {
     from: z.string().required(),
     username: z.string().default(''),
     password: z.string().default(''),
+    allowPlaintextAuth: z.boolean().default(false),
+    timeoutMs: z.number().min(1).default(DEFAULT_SMTP_TIMEOUT_MS),
   })
 
-  private readonly spec: {
-    host: string
-    port: number
-    secure: boolean
-    from: string
-    username: string | undefined
-    password: string | undefined
-  }
+  private readonly spec: SmtpSpec
 
   /**
    * @param ctx - Cordis context.
@@ -71,6 +73,8 @@ export class SmtpMailer extends Mailer {
       from,
       username,
       password,
+      allowPlaintextAuth: config.allowPlaintextAuth === true,
+      timeoutMs: config.timeoutMs ?? DEFAULT_SMTP_TIMEOUT_MS,
     }
   }
 
@@ -90,6 +94,8 @@ interface SmtpSpec {
   from: string
   username: string | undefined
   password: string | undefined
+  allowPlaintextAuth: boolean
+  timeoutMs: number
 }
 
 /**
@@ -98,12 +104,26 @@ interface SmtpSpec {
  * @param message - recipient, subject, and body.
  */
 export async function sendSmtp(spec: SmtpSpec, message: MailMessage): Promise<void> {
-  const socket = await openSocket(spec)
+  const { socket, session } = openSession(spec)
+  const timer = setTimeout(() => {
+    session.fail(new Error('mailer-smtp: timed out'))
+  }, spec.timeoutMs)
   try {
-    const session = new SmtpSession(socket)
     await session.greeting()
-    await session.command(`EHLO ${spec.host}`, 250)
+    let encrypted = spec.secure
+    const ehlo = await session.command(`EHLO ${spec.host}`, 250)
+    if (!encrypted && advertisesStartTls(ehlo)) {
+      await session.command('STARTTLS', 220)
+      await session.startTls(spec.host)
+      await session.command(`EHLO ${spec.host}`, 250)
+      encrypted = true
+    }
     if (spec.username !== undefined && spec.password !== undefined) {
+      if (!encrypted && !spec.allowPlaintextAuth) {
+        throw new Error(
+          'mailer-smtp: AUTH requires TLS (STARTTLS or secure: true); set allowPlaintextAuth to override',
+        )
+      }
       const token = Buffer.from(`\0${spec.username}\0${spec.password}`).toString('base64')
       await session.command(`AUTH PLAIN ${token}`, 235)
     }
@@ -117,84 +137,170 @@ export async function sendSmtp(spec: SmtpSpec, message: MailMessage): Promise<vo
     )
     await session.command('QUIT', 221)
   } finally {
+    clearTimeout(timer)
     socket.destroy()
   }
 }
 
-function openSocket(spec: SmtpSpec): Promise<Socket> {
+function openSession(spec: SmtpSpec): { socket: Socket; session: SmtpSession } {
+  const socket = spec.secure
+    ? tlsConnect({ host: spec.host, port: spec.port, servername: spec.host })
+    : tcpConnect({ host: spec.host, port: spec.port })
+  return { socket, session: new SmtpSession(socket) }
+}
+
+function advertisesStartTls(reply: string): boolean {
+  return /^250[\s-]STARTTLS\b/im.test(reply)
+}
+
+function upgradeTls(socket: Socket, host: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const socket = spec.secure
-      ? tlsConnect({ host: spec.host, port: spec.port })
-      : tcpConnect({ host: spec.host, port: spec.port })
+    const tlsSocket = tlsConnect({ socket, host, servername: host })
     const onError = (error: Error): void => {
       reject(error)
     }
-    socket.once('error', onError)
-    socket.once('connect', () => {
-      socket.off('error', onError)
-      resolve(socket)
+    tlsSocket.once('error', onError)
+    tlsSocket.once('secureConnect', () => {
+      tlsSocket.off('error', onError)
+      resolve(tlsSocket)
     })
   })
 }
 
+/**
+ * Return the slice through the first SMTP final-reply line (`XYZ `), or
+ * `undefined` while the buffer still has only continuations (`XYZ-`).
+ */
+function takeCompleteReply(buffer: string): { reply: string; rest: string } | undefined {
+  let offset = 0
+  while (true) {
+    const nl = buffer.indexOf('\r\n', offset)
+    if (nl < 0) return undefined
+    const line = buffer.slice(offset, nl)
+    const terminal = /^\d{3} /.test(line) || !/^\d{3}-/.test(line)
+    offset = nl + 2
+    if (terminal) return { reply: buffer.slice(0, offset), rest: buffer.slice(offset) }
+  }
+}
+
 class SmtpSession {
   private buffer = ''
-  private waiter: ((line: string) => void) | undefined
+  private waiter: { resolve: (reply: string) => void; reject: (error: Error) => void } | undefined
+  private failure: Error | undefined
+  private socket: Socket
 
-  constructor(private readonly socket: Socket) {
-    socket.on('data', (chunk: Buffer) => {
-      this.buffer += chunk.toString('utf8')
-      this.flush()
-    })
+  constructor(socket: Socket) {
+    this.socket = socket
+    this.bind()
+  }
+
+  /**
+   * Reject the in-flight reply (if any) and destroy the socket.
+   * @param error - timeout, I/O, or protocol failure.
+   */
+  fail(error: Error): void {
+    if (this.failure !== undefined) return
+    this.failure = error
+    const waiter = this.waiter
+    this.waiter = undefined
+    waiter?.reject(error)
+    this.socket.destroy()
+  }
+
+  /**
+   * Wrap the current socket with TLS after a 220 STARTTLS reply.
+   * @param host - SMTP hostname for SNI.
+   */
+  async startTls(host: string): Promise<void> {
+    this.unbind()
+    try {
+      this.socket = await upgradeTls(this.socket, host)
+    } catch (error) {
+      this.fail(error as Error)
+      throw error
+    }
+    this.buffer = ''
+    this.bind()
   }
 
   /**
    * Wait for the server greeting.
    */
   greeting(): Promise<void> {
-    return this.expect(220)
+    return this.expect(220).then(() => undefined)
   }
 
   /**
    * Send one command and wait for a matching reply code.
    * @param line - SMTP command without CRLF, or a DATA payload ending in `.`.
    * @param code - expected numeric reply.
+   * @returns the complete reply, including continuation lines.
    */
-  async command(line: string, code: number): Promise<void> {
+  async command(line: string, code: number): Promise<string> {
+    /* v8 ignore next -- close can land between greeting and the next write */
+    if (this.failure !== undefined) throw this.failure
     this.socket.write(`${line}\r\n`)
-    await this.expect(code)
+    return this.expect(code)
   }
 
-  private expect(code: number): Promise<void> {
+  private expect(code: number): Promise<string> {
     return this.readReply().then((reply) => {
-      if (!reply.startsWith(String(code))) {
+      const trimmed = reply.trim()
+      const idx = trimmed.lastIndexOf('\r\n')
+      const last = idx < 0 ? trimmed : trimmed.slice(idx + 2)
+      if (!last.startsWith(`${String(code)} `)) {
         throw new Error(`mailer-smtp: expected ${String(code)}, got ${reply.trim()}`)
       }
+      return reply
     })
   }
 
   private readReply(): Promise<string> {
-    return new Promise((resolve) => {
-      this.waiter = resolve
+    return new Promise((resolve, reject) => {
+      /* v8 ignore next 3 -- close can land before the next waiter is armed */
+      if (this.failure !== undefined) {
+        reject(this.failure)
+        return
+      }
+      this.waiter = { resolve, reject }
       this.flush()
     })
+  }
+
+  private onData = (chunk: Buffer): void => {
+    this.buffer += chunk.toString('utf8')
+    this.flush()
+  }
+
+  private onError = (error: Error): void => {
+    this.fail(error)
+  }
+
+  private onClose = (): void => {
+    this.fail(new Error('mailer-smtp: connection closed'))
+  }
+
+  private bind(): void {
+    this.socket.on('data', this.onData)
+    this.socket.on('error', this.onError)
+    this.socket.on('close', this.onClose)
+  }
+
+  private unbind(): void {
+    this.socket.off('data', this.onData)
+    this.socket.off('error', this.onError)
+    this.socket.off('close', this.onClose)
   }
 
   private flush(): void {
     /* v8 ignore next -- a data chunk can arrive before the next waiter is armed */
     if (this.waiter === undefined) return
-    const lines = this.buffer.split('\r\n')
-    if (lines.length < 2) return
-    const complete: string[] = []
-    while (lines.length > 1) {
-      const line = lines.shift() as string
-      complete.push(line)
-      if (/^\d{3} /.test(line)) break
-    }
-    this.buffer = lines.join('\r\n')
+    const taken = takeCompleteReply(this.buffer)
+    if (taken === undefined) return
+    this.buffer = taken.rest
     const waiter = this.waiter
     this.waiter = undefined
-    waiter(complete.join('\r\n'))
+    waiter.resolve(taken.reply)
   }
 }
 

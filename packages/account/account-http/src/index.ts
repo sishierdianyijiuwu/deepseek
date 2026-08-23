@@ -144,7 +144,8 @@ export async function handleAuth(
 
 /**
  * Complete email verification from a named GET `/verify?token=` route, then
- * redirect onto `/` so the SPA can show the outcome.
+ * redirect onto `/` so the SPA can show the outcome. HEAD returns 200 and
+ * does not consume the token.
  * @param req - incoming request.
  * @param res - response to write.
  * @param accounts - Account service.
@@ -156,7 +157,13 @@ export async function handleVerify(
 ): Promise<void> {
   /* v8 ignore next -- node:http always sets method on server requests */
   const method = req.method ?? 'GET'
-  if (method !== 'GET' && method !== 'HEAD') {
+  if (method === 'HEAD') {
+    // Mail scanners HEAD mailbox links; do not consume the single-use token.
+    res.writeHead(200)
+    res.end()
+    return
+  }
+  if (method !== 'GET') {
     res.writeHead(405, { allow: 'GET, HEAD' })
     res.end()
     return
@@ -305,9 +312,12 @@ function failure(code: string, message: string): { ok: false; error: { code: str
   return { ok: false, error: { code, message } }
 }
 
-function registerMessage(code: 'invalid_email' | 'invalid_password' | 'email_taken'): string {
+function registerMessage(
+  code: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed',
+): string {
   if (code === 'invalid_email') return 'Enter a valid email address'
   if (code === 'invalid_password') return 'Password is too short'
+  if (code === 'mail_failed') return 'Account created; send a new verification email'
   return 'An Account already exists for this email'
 }
 

@@ -12,8 +12,9 @@ HTTP Consumer that registers unauthenticated auth routes on `ctx.webServer` besi
 | POST | `/auth/resend-verification` | `{ email }` → new mail when unverified |
 | GET | `/auth/me` | current Sign-in session from the cookie |
 | GET | `/verify` | `?token=` named host route; redirects to `/?verified=ok` or `/?verified=invalid` |
+| HEAD | `/verify` | 200; does not consume the token |
 
-The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }`; carrier failures use 400/405/413/415/404.
+The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }` (`mail_failed` when the Unverified Account row exists but the mailer rejected the send); carrier failures use 400/405/413/415/404.
 
 ## Model Experience
 

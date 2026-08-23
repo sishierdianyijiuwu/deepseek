@@ -26,7 +26,7 @@ export function AccountGate(props: AccountGateProps): ReactNode {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [signedInEmail, setSignedInEmail] = useState('')
 
@@ -52,7 +52,7 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     }, () => {
       if (cancelled) return
       applyVerifiedNotice()
-      setError(t('error.network'))
+      setError({ code: 'network', message: t('error.network') })
       setScreen('sign-in')
     })
     return () => {
@@ -60,26 +60,33 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     }
   }, [getSearch, me, replaceSearch, t])
 
-  const run = (task: () => Promise<AuthResult>, onOk: () => void): void => {
+  const run = (
+    task: () => Promise<AuthResult>,
+    onOk: () => void,
+    onFail?: (code: string) => void,
+  ): void => {
     if (busy) return
     setBusy(true)
     setError(null)
     void task().then((result) => {
       setBusy(false)
       if (!result.ok) {
-        setError(result.error.message)
+        setError(result.error)
+        onFail?.(result.error.code)
         return
       }
       onOk()
     }, () => {
       setBusy(false)
-      setError(t('error.network'))
+      setError({ code: 'network', message: t('error.network') })
     })
   }
 
   const onRegister = (event: FormEvent): void => {
     event.preventDefault()
-    run(() => register(email, password), () => { setScreen('check-email') })
+    run(() => register(email, password), () => { setScreen('check-email') }, (code) => {
+      if (code === 'mail_failed') setScreen('check-email')
+    })
   }
 
   const onSignIn = (event: FormEvent): void => {
@@ -90,8 +97,12 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     })
   }
 
-  const onResend = (): void => {
-    run(() => resend(email), () => { setNotice(t('checkEmail.body')) })
+  const onResend = (event?: FormEvent): void => {
+    event?.preventDefault()
+    run(() => resend(email), () => {
+      setError(null)
+      setNotice(t('checkEmail.body'))
+    })
   }
 
   const onSignOut = (): void => {
@@ -121,13 +132,22 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     : screen === 'check-email'
       ? t('title.checkEmail')
       : t('title.signIn')
+  const onSubmit = screen === 'register'
+    ? onRegister
+    : screen === 'check-email'
+      ? onResend
+      : onSignIn
+  const offerResend = error?.code === 'unverified' || error?.code === 'email_taken'
+  const resendLabel = busy ? t('busy') : t('submit.resend')
 
   return (
     <OnboardingSurface>
-      <form className={css.form} onSubmit={screen === 'register' ? onRegister : onSignIn}>
+      <form className={css.form} onSubmit={onSubmit}>
         <h1 className={css.title}>{title}</h1>
         {notice !== null && <p className={css.notice}>{notice}</p>}
-        {screen === 'check-email' && <p className={css.notice}>{t('checkEmail.body')}</p>}
+        {screen === 'check-email' && error?.code !== 'mail_failed' && (
+          <p className={css.notice}>{t('checkEmail.body')}</p>
+        )}
         <label className={css.label}>
           {t('email')}
           <Input
@@ -150,7 +170,7 @@ export function AccountGate(props: AccountGateProps): ReactNode {
             />
           </label>
         )}
-        {error !== null && <p className={css.error} role="alert">{error}</p>}
+        {error !== null && <p className={css.error} role="alert">{error.message}</p>}
         <div className={css.actions}>
           {screen === 'register' && (
             <Button variant="primary" disabled={busy} type="submit">
@@ -163,8 +183,13 @@ export function AccountGate(props: AccountGateProps): ReactNode {
             </Button>
           )}
           {screen === 'check-email' && (
-            <Button variant="primary" disabled={busy} type="button" onClick={onResend}>
-              {busy ? t('busy') : t('submit.resend')}
+            <Button variant="primary" disabled={busy} type="submit">
+              {resendLabel}
+            </Button>
+          )}
+          {offerResend && (
+            <Button variant="primary" disabled={busy} type="button" onClick={() => { onResend() }}>
+              {resendLabel}
             </Button>
           )}
           {screen !== 'sign-in' && (

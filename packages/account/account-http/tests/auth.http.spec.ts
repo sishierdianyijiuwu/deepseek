@@ -58,10 +58,7 @@ let failSend = false
 
 class FakeMailer extends Mailer {
   override async send(message: MailMessage): Promise<void> {
-    if (failSend) {
-      failSend = false
-      throw new Error('smtp down')
-    }
+    if (failSend) throw new Error('smtp down')
     mailbox.push(message)
   }
 }
@@ -197,6 +194,10 @@ describe('auth HTTP', () => {
     const meAnonymous = await request(harness, '/auth/me')
     expect(meAnonymous.json).toEqual({ ok: true, signedIn: false })
 
+    const scanned = await request(harness, `/verify?token=${token}`, { method: 'HEAD' })
+    expect(scanned.status).toBe(200)
+    expect(scanned.location).toBeNull()
+
     const verified = await request(harness, `/verify?token=${token}`)
     expect(verified.status).toBe(302)
     expect(verified.location).toBe('/?verified=ok')
@@ -261,7 +262,7 @@ describe('auth HTTP', () => {
     expect((await request(harness, '/auth')).status).toBe(405)
     expect((await request(harness, '/auth/me', { method: 'POST' })).status).toBe(405)
     expect((await request(harness, '/verify', { method: 'POST' })).status).toBe(405)
-    expect((await request(harness, '/verify', { method: 'HEAD' })).status).toBe(302)
+    expect((await request(harness, '/verify', { method: 'HEAD' })).status).toBe(200)
     expect((await post(harness, '/auth/sign-out', {})).json).toEqual({ ok: true })
     harness.jar.absorb(new Response(null, { headers: { 'set-cookie': `${SIGN_IN_COOKIE}=%zz` } }))
     expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
@@ -326,7 +327,16 @@ describe('auth HTTP', () => {
     const harness = await boot()
     failSend = true
     const result = await post(harness, '/auth/register', { email: 'mail@example.com', password: 'correct-horse' })
-    expect(result.status).toBe(400)
+    expect(result.status).toBe(200)
+    expect(result.json).toMatchObject({ ok: false, error: { code: 'mail_failed' } })
+    expect(mailbox).toHaveLength(0)
+    const silentResend = await post(harness, '/auth/resend-verification', { email: 'mail@example.com' })
+    expect(silentResend.json).toEqual({ ok: true })
+    expect(mailbox).toHaveLength(0)
+    failSend = false
+    const resend = await post(harness, '/auth/resend-verification', { email: 'mail@example.com' })
+    expect(resend.json).toEqual({ ok: true })
+    expect(mailbox).toHaveLength(1)
     const retry = await post(harness, '/auth/register', { email: 'mail@example.com', password: 'correct-horse' })
     expect(retry.json).toMatchObject({ ok: false, error: { code: 'email_taken' } })
   })

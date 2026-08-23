@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 PostgreSQL Service Provider for `ctx.accounts`. Config `url` is a `postgres://` / `postgresql://` connection string, or `pglite:` for an in-process PostgreSQL engine used by tests. `publicBaseUrl` is the origin used in verification links. Missing `url` or `publicBaseUrl`, a failed connection, or a schema version other than `SCHEMA_VERSION` (1) fails at load. Email uniqueness is enforced by a unique index; concurrent duplicate registration yields one Account.
 
-Passwords are stored as scrypt hashes. Verification tokens and Sign-in session ids are stored as SHA-256 of the raw secret. The provider injects `ctx.mailer` and sends the verification message after a successful register or resend.
+Passwords are stored as scrypt hashes. Verification tokens and Sign-in session ids are stored as SHA-256 of the raw secret. The provider injects `ctx.mailer` and sends the verification message after a successful insert. If that send throws, `register` returns `mail_failed`; `resendVerification` stays a silent success so the HTTP route cannot enumerate Unverified Accounts.
 
 ## Model Experience
 

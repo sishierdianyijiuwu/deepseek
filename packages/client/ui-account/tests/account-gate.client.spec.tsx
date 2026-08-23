@@ -116,6 +116,55 @@ describe('AccountGate', () => {
     expect(signedIn.props.replaceSearch).not.toHaveBeenCalled()
   })
 
+  it('offers resend after unverified sign-in and email_taken register', async () => {
+    const signIn = vi.fn(async (): Promise<AuthResult> => ({
+      ok: false,
+      error: { code: 'unverified', message: 'Verify first' },
+    }))
+    const resend = vi.fn(async (): Promise<AuthResult> => ({ ok: true }))
+    const { props } = setup({ signIn, resend })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy() })
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'a@b.c' } })
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password12' } })
+    fireEvent.submit(screen.getByRole('button', { name: '登录' }).closest('form')!)
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('Verify first') })
+    fireEvent.click(screen.getByRole('button', { name: '重发验证邮件' }))
+    await waitFor(() => { expect(props.resend).toHaveBeenCalledWith('a@b.c') })
+
+    cleanup()
+    const register = vi.fn(async (): Promise<AuthResult> => ({
+      ok: false,
+      error: { code: 'email_taken', message: 'taken' },
+    }))
+    setup({ register, resend: vi.fn(async (): Promise<AuthResult> => ({ ok: true })) })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy() })
+    fireEvent.click(screen.getByRole('button', { name: '没有账户？注册' }))
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'taken@b.c' } })
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password12' } })
+    fireEvent.submit(screen.getByRole('button', { name: '注册' }).closest('form')!)
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('taken') })
+    fireEvent.click(screen.getByRole('button', { name: '重发验证邮件' }))
+    await waitFor(() => { expect(screen.getByText('我们已经向该邮箱发送了验证链接。验证完成后再登录。')).toBeTruthy() })
+  })
+
+  it('routes mail_failed register to check-email and submits resend', async () => {
+    const register = vi.fn(async (): Promise<AuthResult> => ({
+      ok: false,
+      error: { code: 'mail_failed', message: 'Account created; send a new verification email' },
+    }))
+    const resend = vi.fn(async (): Promise<AuthResult> => ({ ok: true }))
+    const { props } = setup({ register, resend })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy() })
+    fireEvent.click(screen.getByRole('button', { name: '没有账户？注册' }))
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'a@b.c' } })
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password12' } })
+    fireEvent.submit(screen.getByRole('button', { name: '注册' }).closest('form')!)
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '查收邮件' })).toBeTruthy() })
+    expect(screen.getByRole('alert').textContent).toBe('Account created; send a new verification email')
+    fireEvent.submit(screen.getByRole('button', { name: '重发验证邮件' }).closest('form')!)
+    await waitFor(() => { expect(props.resend).toHaveBeenCalledWith('a@b.c') })
+  })
+
   it('does not double-submit while busy', async () => {
     let resolveSignIn!: (value: AuthResult) => void
     const signIn = vi.fn(() => new Promise<AuthResult>((resolve) => { resolveSignIn = resolve }))

@@ -14,7 +14,7 @@ export type SignInSessionId = Branded<'SignInSessionId'>
 /** Outcome of {@link import('./index.ts').Accounts.register}. */
 export type RegisterResult =
   | { ok: true }
-  | { ok: false; error: 'invalid_email' | 'invalid_password' | 'email_taken' }
+  | { ok: false; error: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed' }
 
 /** Outcome of {@link import('./index.ts').Accounts.verifyEmail}. */
 export type VerifyEmailResult =

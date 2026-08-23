@@ -37,7 +37,7 @@ Status: implemented
 | POST | `/auth/sign-out` |
 | POST | `/auth/resend-verification` |
 | GET | `/auth/me` |
-| GET | `/verify` |
+| GET | `/verify`（`HEAD` 返回 200 且不消费令牌） |
 
 `GET /verify?token=` 存在，是因为 `frontend-static` 对未知路径返回 404；处理器完成验证后重定向到 `/?verified=ok` 或 `/?verified=invalid`，让 `/` 上的 SPA 展示结果。业务结果的 JSON 为 HTTP 200 的 `{ ok: true }` 或 `{ ok: false, error: { code, message } }`。
 
@@ -55,7 +55,7 @@ ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url
 
 ### 邮件发送
 
-邮件是 mailer 端口（`ctx.mailer.send`）。SMTP 是配置（`dsh-mailer-smtp`）。HTTP 测试通过 Loader 注入假的 Mailer 子类；它们从不打开真实 SMTP。
+邮件是 mailer 端口（`ctx.mailer.send`）。SMTP 是配置（`dsh-mailer-smtp`）：587 端口在服务器宣告时升级 STARTTLS，未加密套接字上的 AUTH 需要 `allowPlaintextAuth`，隐式 TLS 是 `secure: true`（通常 465 / `DSH_SMTP_SECURE=1`），单次发送受 `timeoutMs` 限制。多行回复等到 `XYZ ` 终结行。若 Unverified Account 行已提交后 mailer 抛出，`register` 返回 `mail_failed`（HTTP 200），UI 可以重发。HTTP 测试通过 Loader 注入假的 Mailer 子类；它们从不打开真实 SMTP。
 
 ### hosted 与 web
 

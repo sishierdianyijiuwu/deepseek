@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-`ctx.accounts` 的 Service Definition。Account 由规范化邮箱和单向 Password 哈希标识。注册会创建 Unverified Account；`verifyEmail` 消费一次性令牌；邮箱验证后 `signIn` 签发 Sign-in session id；`signOut` 与 `lookupSignIn` 结束或解析该 id。未知邮箱与错误 Password 共用 `invalid_credentials`，因此登录无法枚举 Account。`hashPassword`、`normalizeEmail` 与 `mintSecret` 是每个提供方必须使用的哈希与身份规则。
+`ctx.accounts` 的 Service Definition。Account 由规范化邮箱和单向 Password 哈希标识。注册会创建 Unverified Account；`verifyEmail` 消费一次性令牌；邮箱验证后 `signIn` 签发 Sign-in session id；`signOut` 与 `lookupSignIn` 结束或解析该 id。Unverified Account 行已写入但 mailer 发送失败时，`register` 返回 `mail_failed`。未知邮箱与错误 Password 共用 `invalid_credentials`，因此登录无法枚举 Account。`hashPassword`、`normalizeEmail` 与 `mintSecret` 是每个提供方必须使用的哈希与身份规则。
 
 HTTP cookie 与 PostgreSQL 行由 Consumer 和提供方拥有。匿名身份不是 Account id。
 

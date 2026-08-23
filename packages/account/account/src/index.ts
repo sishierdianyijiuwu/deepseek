@@ -65,7 +65,9 @@ export abstract class Accounts extends Service {
    * Create an Unverified Account and send a verification message.
    * @param email - visitor-supplied email.
    * @param password - visitor-supplied Password.
-   * @returns whether registration created the Account.
+   * @returns `{ ok: true }` when the Unverified Account exists and the
+   *   verification message was sent; `mail_failed` when the row exists but
+   *   the mailer rejected the send.
    */
   abstract register(email: string, password: string): Promise<RegisterResult>
 

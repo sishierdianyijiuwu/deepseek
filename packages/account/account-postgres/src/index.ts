@@ -137,7 +137,9 @@ export class PostgresAccounts extends Accounts {
    * Create an Unverified Account and send a verification message.
    * @param email - visitor-supplied email.
    * @param password - visitor-supplied Password.
-   * @returns whether registration created the Account.
+   * @returns `{ ok: true }` when the Unverified Account exists and the
+   *   verification message was sent; `mail_failed` when the row exists but
+   *   the mailer rejected the send.
    */
   override async register(email: string, password: string): Promise<RegisterResult> {
     const normalized = normalizeEmail(email)
@@ -166,7 +168,12 @@ export class PostgresAccounts extends Accounts {
       if (isUniqueViolation(error)) return { ok: false, error: 'email_taken' }
       throw error
     }
-    await this.sendVerification(normalized, token.raw)
+    try {
+      await this.sendVerification(normalized, token.raw)
+    } catch {
+      // Mailer I/O. The Unverified Account row is already committed.
+      return { ok: false, error: 'mail_failed' }
+    }
     return { ok: true }
   }
 
@@ -225,7 +232,12 @@ export class PostgresAccounts extends Accounts {
       )
       return true
     })
-    if (updated) await this.sendVerification(normalized, token.raw)
+    if (!updated) return
+    try {
+      await this.sendVerification(normalized, token.raw)
+    } catch {
+      // Mailer I/O. HTTP resend stays 200 so the route cannot enumerate Unverified Accounts.
+    }
   }
 
   /**

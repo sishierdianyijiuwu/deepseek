@@ -37,7 +37,7 @@ Unauthenticated routes are named `webServer` registrations, not `session.registe
 | POST | `/auth/sign-out` |
 | POST | `/auth/resend-verification` |
 | GET | `/auth/me` |
-| GET | `/verify` |
+| GET | `/verify` (`HEAD` returns 200 and does not consume the token) |
 
 `GET /verify?token=` exists because `frontend-static` 404s unknown pathnames; the handler verifies then redirects to `/?verified=ok` or `/?verified=invalid` so the SPA on `/` can show the outcome. JSON bodies are `{ ok: true }` or `{ ok: false, error: { code, message } }` at HTTP 200 for business results.
 
@@ -55,7 +55,7 @@ ADR 0017: Account and Sign-in session live in PostgreSQL from v1. Config `url` i
 
 ### Mailer
 
-Email is a mailer port (`ctx.mailer.send`). SMTP is configuration (`dsh-mailer-smtp`). HTTP tests inject a fake Mailer subclass through Loader; they never open live SMTP.
+Email is a mailer port (`ctx.mailer.send`). SMTP is configuration (`dsh-mailer-smtp`): port 587 upgrades STARTTLS when advertised, AUTH on a non-TLS socket requires `allowPlaintextAuth`, implicit TLS is `secure: true` (typically 465 / `DSH_SMTP_SECURE=1`), and one send is bounded by `timeoutMs`. Multiline replies wait for a `XYZ ` final line. If the mailer throws after the Unverified Account row is committed, `register` returns `mail_failed` (HTTP 200) so the UI can resend. HTTP tests inject a fake Mailer subclass through Loader; they never open live SMTP.
 
 ### Hosted vs web
 

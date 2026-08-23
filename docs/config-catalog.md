@@ -1428,10 +1428,14 @@ export interface Config {
   username?: string
   /** SMTP AUTH password, when the server requires it. */
   password?: string
+  /** Allow AUTH PLAIN on a socket that is not TLS. Defaults to false. */
+  allowPlaintextAuth?: boolean
+  /** Deadline in milliseconds for one send, including connect. */
+  timeoutMs?: number
 }
 ```
 
-Source: [`packages/account/mailer-smtp/src/index.ts:13`](../packages/account/mailer-smtp/src/index.ts)
+Source: [`packages/account/mailer-smtp/src/index.ts:17`](../packages/account/mailer-smtp/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-client"></a>
 
