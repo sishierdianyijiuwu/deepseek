@@ -13,11 +13,15 @@ import type { AccountId } from '@deepseek-ai/dsh-account'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { isUniqueViolation, openSql, type SqlClient } from '@deepseek-ai/dsh-account-postgres'
-import { writeWorkspaceFile } from './files.ts'
+import { listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile } from './files.ts'
 import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
 
 export { SCHEMA_VERSION }
-export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError } from './files.ts'
+export {
+  MAX_WORKSPACE_BYTES,
+  CloudWorkspacePathError,
+  CloudWorkspaceQuotaError,
+} from './files.ts'
 export type { CloudWorkspaceRecord } from './types.ts'
 
 /** v1 cap: three Workspaces per Account (ADR 0009). */
@@ -237,6 +241,35 @@ export class CloudWorkspaces extends Service {
       if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
       await writeWorkspaceFile(path, relativePath, data)
     })
+  }
+
+  /**
+   * List regular files in an owned Workspace as POSIX-relative paths.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @returns sorted relative paths.
+   */
+  async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]> {
+    const path = await this.ownedPath(accountId, workspaceId)
+    if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+    return listWorkspaceFiles(path)
+  }
+
+  /**
+   * Read one contained file from an owned Workspace.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param relativePath - file path inside the Workspace.
+   * @returns file bytes.
+   */
+  async readFile(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    relativePath: string,
+  ): Promise<Uint8Array> {
+    const path = await this.ownedPath(accountId, workspaceId)
+    if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+    return readWorkspaceFile(path, relativePath)
   }
 
   /**

@@ -9,7 +9,12 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
-import { currentAccountId, type AccountId } from '@deepseek-ai/dsh-account'
+import {
+  currentAccountId,
+  currentOperatorAccess,
+  viewingAccountId,
+  type AccountId,
+} from '@deepseek-ai/dsh-account'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -1046,7 +1051,7 @@ function visibleWorkspace(ctx: Context, id: WorkspaceId): Workspace | undefined 
   if (workspace === undefined) return undefined
   const cloud = ctx.get('cloudWorkspaces')
   if (cloud === undefined) return workspace
-  const viewer = currentAccountId()
+  const viewer = viewingAccountId()
   if (viewer === undefined || !cloud.owns(viewer, workspace.id)) return undefined
   return workspace
 }
@@ -1107,6 +1112,28 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return ctx.get('accounts') !== undefined
   }
 
+  function refuseOperatorWrite<T>(request: RpcRequest<unknown>): RpcResponse<T> | undefined {
+    if (currentOperatorAccess() === undefined) return undefined
+    return err(request, {
+      code: 'operator-access-readonly',
+      message: 'Operator access is read-only; prompt, tool execution, and Credential secret read are refused',
+      details: {},
+    })
+  }
+
+  async function recordOperatorOpening(sessionId?: SessionId): Promise<void> {
+    const access = currentOperatorAccess()
+    const accounts = ctx.get('accounts')
+    if (access === undefined || accounts === undefined) return
+    await accounts.recordOperatorAccess({
+      operatorAccountId: access.operatorAccountId,
+      operatorEmail: access.operatorEmail,
+      targetAccountId: access.targetAccountId,
+      ...sessionId === undefined ? {} : { sessionId },
+      openedAt: Date.now(),
+    })
+  }
+
   /**
    * Hosted prompt refusal: an Account with no stored model Credential cannot
    * send a Session message. Visibility checks run first so a guessed id stays
@@ -1135,7 +1162,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   function filterArchivedSessionIds(
     ids: readonly SessionId[],
-    viewer: AccountId | undefined = currentAccountId(),
+    viewer: AccountId | undefined = viewingAccountId(),
   ): SessionId[] {
     if (!isolationActive()) return [...ids]
     if (viewer === undefined) return []
@@ -1151,7 +1178,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     })
   }
 
-  function visibleArchivedSessionIds(viewer: AccountId | undefined = currentAccountId()): SessionId[] {
+  function visibleArchivedSessionIds(viewer: AccountId | undefined = viewingAccountId()): SessionId[] {
     return filterArchivedSessionIds(workspaceRegistry().archivedSessionIds, viewer)
   }
 
@@ -1170,7 +1197,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   function headerVisible(header: SessionHeader): boolean {
-    return headerVisibleTo(header, currentAccountId())
+    return headerVisibleTo(header, viewingAccountId())
   }
 
   function visibleSessionIdTo(sessionId: SessionId, viewer: AccountId | undefined): boolean {
@@ -1614,7 +1641,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */
   async function forkWorkspace(source: Pick<Session, 'id' | 'header'>): Promise<Workspace | undefined> {
     const cloud = ctx.get('cloudWorkspaces')
-    const viewer = currentAccountId()
+    const viewer = viewingAccountId()
     const workspaces = cloud === undefined || viewer === undefined
       ? workspaceRegistry().list()
       : cloud.listOwned(viewer)
@@ -2121,6 +2148,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // Logs without a cwd are not served; every session records its project
       // at create time.
       async list(request) {
+        await recordOperatorOpening()
         return ok(request, { items: await listVisibleSessionSummaries() })
       },
 
@@ -2140,6 +2168,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         try {
+          await recordOperatorOpening()
           const visible = await listVisibleSessionSummaries(signal)
           if (isAborted(signal)) return cancelled()
           if (visible.length === 0) return ok(request, { items: [], hasMore: false })
@@ -2258,6 +2287,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async create(request) {
+        const blocked = refuseOperatorWrite<{
+          sessionId: SessionId
+          agentPreset?: string
+        }>(request)
+        if (blocked !== undefined) return blocked
         const sessionId = request.payload.sessionId ?? `session-${randomUUID()}` as SessionId
         let workspace: Workspace | undefined
         if (ctx.get('cloudWorkspaces') !== undefined && request.payload.workspaceId === undefined) {
@@ -2346,6 +2380,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
           const source = await historySourceFor(sessionId)
+          await recordOperatorOpening(sessionId)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2383,6 +2418,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async selectModel(request) {
+        const blocked = refuseOperatorWrite<{ selected: ModelSelection }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, provider, model, reasoningEffort } = request.payload
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
@@ -2422,6 +2459,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async rename(request) {
+        const blocked = refuseOperatorWrite<{ title: string; seq: number }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, title } = request.payload
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
@@ -2452,6 +2491,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async fork(request) {
+        const blocked = refuseOperatorWrite<{ sessionId: SessionId }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, atSeq } = request.payload
         let source: SessionReadState
         try {
@@ -2551,6 +2592,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async prompt(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) {
+          const hidden = await refuseInvisibleSession(request, request.payload.sessionId)
+          if (hidden !== undefined) return hidden
+          return blocked
+        }
         const { sessionId, mode, content, clientTimeZone } = request.payload
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
@@ -2615,6 +2662,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         let state: SessionReadState
         try {
           state = await readSessionState(sessionId)
+          await recordOperatorOpening(sessionId)
         } catch (error: unknown) {
           if (error instanceof SessionNotFound) {
             return err(request, {
@@ -2660,6 +2708,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async updateQueue(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) {
+          const hidden = await refuseInvisibleSession(request, request.payload.sessionId)
+          if (hidden !== undefined) return hidden
+          return blocked
+        }
         const { sessionId, itemId, action } = request.payload
         if (action.kind === 'edit' && action.content.some(block => block.type !== 'text')) {
           return err(request, {
@@ -2715,6 +2769,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const { sessionId } = request.payload
         const hidden = await refuseInvisibleSession(request, sessionId)
         if (hidden !== undefined) return hidden
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) return blocked
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined) {
           return err(request, {
@@ -2853,6 +2909,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async prompt(request, signal) {
+        const blocked = refuseOperatorWrite<SubagentPromptReceipt>(request)
+        if (blocked !== undefined) return blocked
         const { parentSessionId, childSessionId, content, clientTimeZone } = request.payload
         try {
           await requireVisibleHeader(parentSessionId)
@@ -2910,6 +2968,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // live Activation, which is what keeps a live child interruptible while
       // its parent Agent is offline. Absent targets are accepted no-ops there.
       async interrupt(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) return blocked
         const { parentSessionId, childSessionId } = request.payload
         try {
           await requireVisibleHeader(parentSessionId)
@@ -2940,20 +3000,23 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     },
 
     workspace: {
-      list(request) {
+      async list(request) {
+        await recordOperatorOpening()
         const cloud = ctx.get('cloudWorkspaces')
-        const viewer = currentAccountId()
+        const viewer = viewingAccountId()
         const items = cloud === undefined
           ? workspaceRegistry().list()
           : viewer === undefined ? [] : cloud.listOwned(viewer)
-        return Promise.resolve(ok(request, {
+        return ok(request, {
           items: items.map(workspaceView),
           archivedSessionIds: visibleArchivedSessionIds(),
           emptyCreate: cloud !== undefined,
-        }))
+        })
       },
 
       async create(request) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView>; created: boolean }>(request)
+        if (blocked !== undefined) return blocked
         const cloud = ctx.get('cloudWorkspaces')
         const { path, title } = request.payload
         if (cloud !== undefined) {
@@ -3009,6 +3072,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async rename(request) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView> }>(request)
+        if (blocked !== undefined) return blocked
         const { payload } = request
         const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
@@ -3020,7 +3085,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const operation = workspaceCreationChain.then(async () => {
           if (title === workspace.title) return
           const cloud = ctx.get('cloudWorkspaces')
-          const viewer = currentAccountId()
+          const viewer = viewingAccountId()
           const siblings = cloud === undefined
             ? workspaceRegistry().list()
             : viewer === undefined ? [] : cloud.listOwned(viewer)
@@ -3051,6 +3116,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async delete(request) {
+        const blocked = refuseOperatorWrite<{ deleted: true }>(request)
+        if (blocked !== undefined) return blocked
         const { workspaceId } = request.payload
         const id = brandWorkspaceId(workspaceId)
         if (visibleWorkspace(ctx, id) === undefined) return workspaceNotFound(request, workspaceId)
@@ -3066,6 +3133,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async insertBefore(request) {
+        const blocked = refuseOperatorWrite<{ workspaceIds: WorkspaceId[] }>(request)
+        if (blocked !== undefined) return blocked
         const { workspaceId, beforeWorkspaceId } = request.payload
         if (visibleWorkspace(ctx, brandWorkspaceId(workspaceId)) === undefined) {
           return workspaceNotFound(request, workspaceId)
@@ -3080,7 +3149,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             beforeWorkspaceId === undefined ? undefined : brandWorkspaceId(beforeWorkspaceId),
           )
           const cloud = ctx.get('cloudWorkspaces')
-          const viewer = currentAccountId()
+          const viewer = viewingAccountId()
           const visible = cloud === undefined || viewer === undefined
             ? workspaceIds
             : workspaceIds.filter(id => cloud.owns(viewer, id))
@@ -3092,6 +3161,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async insertSessionBefore(request) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView> }>(request)
+        if (blocked !== undefined) return blocked
         const { payload } = request
         const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
@@ -3115,6 +3186,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async archiveSession(request) {
+        const blocked = refuseOperatorWrite<{ archivedSessionIds: SessionId[] }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId } = request.payload
         if (isolationActive()) {
           try {
@@ -3146,6 +3219,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async write(request) {
+        const blocked = refuseOperatorWrite<{ written: true }>(request)
+        if (blocked !== undefined) return blocked
         const cloud = ctx.get('cloudWorkspaces')
         const { workspaceId, path, data } = request.payload
         if (cloud === undefined) return workspaceNotFound(request, workspaceId)
@@ -3164,6 +3239,47 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               message: error.message,
               details: { maxBytes: MAX_WORKSPACE_BYTES },
             })
+          }
+          if (error instanceof CloudWorkspacePathError) {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: error.message,
+              details: { path },
+            })
+          }
+          throw error
+        }
+      },
+
+      async listFiles(request) {
+        const { workspaceId } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        const account = viewingAccountId()
+        if (cloud === undefined || account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          const paths = await cloud.listFiles(account, brandWorkspaceId(workspaceId))
+          await recordOperatorOpening()
+          return ok(request, { paths })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
+          }
+          throw error
+        }
+      },
+
+      async read(request) {
+        const { workspaceId, path } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        const account = viewingAccountId()
+        if (cloud === undefined || account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          const data = await cloud.readFile(account, brandWorkspaceId(workspaceId), path)
+          await recordOperatorOpening()
+          return ok(request, { data: Buffer.from(data).toString('utf8') })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
           }
           if (error instanceof CloudWorkspacePathError) {
             return err(request, {
@@ -3607,6 +3723,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     credentials: {
       async describe(request) {
+        const blocked = refuseOperatorWrite<{ credentials: Record<string, CredentialView> }>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const entries = await Promise.all(request.payload.refs.map(async (ref) => {
@@ -3622,6 +3740,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async set(request) {
+        const blocked = refuseOperatorWrite<Record<string, never>>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const { ref, value } = request.payload
@@ -3638,6 +3758,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async unset(request) {
+        const blocked = refuseOperatorWrite<Record<string, never>>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const { ref } = request.payload
@@ -3715,7 +3837,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const viewer = currentAccountId()
+        const viewer = viewingAccountId()
+        void recordOperatorOpening()
         const queue = new FrameQueue<RpcRequest<MuxFrame>>()
         const subscriber: MuxSubscriber = { queue, viewer }
         muxSubscribers.add(subscriber)
@@ -3829,7 +3952,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       host(_request, signal) {
-        const viewer = currentAccountId()
+        const viewer = viewingAccountId()
         const queue = new FrameQueue<RpcRequest<HostFrame>>()
         const cloud = ctx.get('cloudWorkspaces')
         const committedWorkspaces = workspaceRegistry().list()
@@ -3952,6 +4075,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async sessionLog(request, signal) {
         // A live Session the caller cannot see 404s before flush or `readRaw`.
         const attached = ctx.sessions.get(request.sessionId)
+        if (attached !== undefined && headerVisible(attached.header)) {
+          await recordOperatorOpening(request.sessionId)
+        }
         if (attached !== undefined && !headerVisible(attached.header)) {
           return new Response('session not found', { status: 404 })
         }
@@ -4025,11 +4151,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     },
 
     respond(message: ClientResponse): Promise<RpcReceipt> {
+      if (currentOperatorAccess() !== undefined) {
+        return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      }
       // Route by the echoed rpcId (the wire correlation): approvals first,
       // then questions — the two registries share one id space of UUIDs.
       const approval = pendingApprovals.get(message.rpcId)
       if (approval !== undefined) {
-        if (!visibleSessionIdTo(approval.sessionId, currentAccountId())) {
+        if (!visibleSessionIdTo(approval.sessionId, viewingAccountId())) {
           return Promise.resolve({ accepted: false, reason: 'not-pending' })
         }
         if (!message.result.ok) return Promise.resolve({ accepted: false, reason: 'bad-response' })
@@ -4043,7 +4172,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return Promise.resolve({ accepted: true })
       }
       const pending = pendingQuestions.get(message.rpcId)
-      if (pending === undefined || !visibleSessionIdTo(pending.sessionId, currentAccountId())) {
+      if (pending === undefined || !visibleSessionIdTo(pending.sessionId, viewingAccountId())) {
         return Promise.resolve({ accepted: false, reason: 'not-pending' })
       }
       if (!message.result.ok) {

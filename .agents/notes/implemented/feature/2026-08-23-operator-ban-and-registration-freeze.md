@@ -25,7 +25,7 @@ HTTP Operator routes live beside `/api` on the existing auth Consumer:
 | POST | `/auth/operator/freeze-registration` |
 | GET | `/auth/operator/registration` |
 
-They require a live Sign-in session with `operator: true`. Unauthenticated callers and ordinary Accounts receive `{ ok: false, error: { code: 'forbidden' } }` at HTTP 200. The routes do not read Session logs. Schema version is `SCHEMA_VERSION = 3`.
+They require a live Sign-in session with `operator: true`. Unauthenticated callers and ordinary Accounts receive `{ ok: false, error: { code: 'forbidden' } }` at HTTP 200. The routes do not read Session logs. Schema version is `SCHEMA_VERSION = 4` (audit log columns are [Operator read-only access](2026-08-23-operator-readonly-audit.md)).
 
 ## Alternatives considered
 
@@ -47,4 +47,4 @@ Loader-composed HTTP with PGlite, a fake mailer, and two cookie jars pins: the f
 
 ## Consequences
 
-Operators can Ban and freeze without Operator Session access (later ticket) and without Deletion. An empty `DSH_OPERATOR_EMAILS` leaves the host with no Operators. A Ban that targets the only remaining Operator email can lock that Operator out until the env list and a database edit recover it.
+Operators can Ban and freeze without Deletion. Operator Session access is a separate decision ([Operator read-only access](2026-08-23-operator-readonly-audit.md)). An empty `DSH_OPERATOR_EMAILS` leaves the host with no Operators. A Ban that targets the only remaining Operator email can lock that Operator out until the env list and a database edit recover it.

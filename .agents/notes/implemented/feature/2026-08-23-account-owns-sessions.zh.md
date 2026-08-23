@@ -24,7 +24,7 @@ Host `/api` 把可达性当作操作者身份。Account 出现之后，同一进
 
 ## 后果
 
-带两个 cookie jar 的托管 HTTP 测试是真相来源。Workspace、Ban 和 Operator access 仍属后续工单。已盖 schema 17 的 SQLite 数据库不再打开。
+带两个 cookie jar 的托管 HTTP 测试是真相来源。Operator access 是另一项决策（[Operator 只读访问](2026-08-23-operator-readonly-audit.zh.md)）。已盖 schema 17 的 SQLite 数据库不再打开。
 
 ## 必要验证
 

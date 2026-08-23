@@ -15,7 +15,11 @@ import {
   normalizeEmail,
   signInSessionId,
   verifyPassword,
+  type AccountId,
+  type AccountLookup,
   type BanResult,
+  type OperatorAuditRecord,
+  type OperatorAuditWrite,
   type RegisterResult,
   type ResetPasswordResult,
   type SignInLookup,
@@ -501,6 +505,90 @@ export class PostgresAccounts extends Accounts {
       'SELECT frozen_at FROM registration_control WHERE id = 1',
     )
     return found.rows[0]?.['frozen_at'] != null
+  }
+
+  /**
+   * Look up an Account by email, including Banned and Unverified rows.
+   * @param email - target Account email.
+   * @returns the summary, or `undefined` when no Account exists.
+   */
+  override async lookupByEmail(email: string): Promise<AccountLookup | undefined> {
+    const normalized = normalizeEmail(email)
+    if (normalized === undefined) return undefined
+    const found = await this.client().query(
+      'SELECT id, email, verified_at, banned_at FROM accounts WHERE email_normalized = $1',
+      [normalized],
+    )
+    return this.toLookup(found.rows[0] as AccountRow | undefined)
+  }
+
+  /**
+   * Look up an Account by id, including Banned and Unverified rows.
+   * @param id - opaque Account id.
+   * @returns the summary, or `undefined` when no Account exists.
+   */
+  override async lookupById(id: AccountId): Promise<AccountLookup | undefined> {
+    const found = await this.client().query(
+      'SELECT id, email, verified_at, banned_at FROM accounts WHERE id = $1',
+      [id],
+    )
+    return this.toLookup(found.rows[0] as AccountRow | undefined)
+  }
+
+  /**
+   * Append one Operator-access opening.
+   * @param entry - Operator, target, optional Session, and time.
+   * @returns the persisted row including its id.
+   */
+  override async recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
+    const id = randomUUID()
+    await this.client().query(
+      `INSERT INTO operator_audit_log
+        (id, operator_account_id, operator_email, target_account_id, session_id, opened_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        id,
+        entry.operatorAccountId,
+        entry.operatorEmail,
+        entry.targetAccountId,
+        entry.sessionId ?? null,
+        entry.openedAt,
+      ],
+    )
+    return { id, ...entry }
+  }
+
+  /**
+   * List Operator-access openings, newest first.
+   * @returns every audit row.
+   */
+  override async listOperatorAccess(): Promise<OperatorAuditRecord[]> {
+    const found = await this.client().query(
+      `SELECT id, operator_account_id, operator_email, target_account_id, session_id, opened_at
+       FROM operator_audit_log
+       ORDER BY opened_at DESC, id DESC`,
+    )
+    return found.rows.map((row) => {
+      const sessionId = row['session_id']
+      return {
+        id: String(row['id']),
+        operatorAccountId: accountId(String(row['operator_account_id'])),
+        operatorEmail: String(row['operator_email']),
+        targetAccountId: accountId(String(row['target_account_id'])),
+        ...typeof sessionId === 'string' && sessionId !== '' ? { sessionId } : {},
+        openedAt: Number(row['opened_at']),
+      }
+    })
+  }
+
+  private toLookup(row: AccountRow | undefined): AccountLookup | undefined {
+    if (row === undefined) return undefined
+    return {
+      accountId: accountId(row.id),
+      email: row.email,
+      verified: row.verified_at != null,
+      banned: row.banned_at != null,
+    }
   }
 
   private invalidPassword(password: string): boolean {

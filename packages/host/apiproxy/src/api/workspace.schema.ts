@@ -112,3 +112,24 @@ export const workspaceWriteRequestSchema = z.object({
 export const workspaceWriteValueSchema = z.object({
   written: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.write'>>>
+
+/** workspace.listFiles request payload. */
+export const workspaceListFilesRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.listFiles'>>>
+
+/** workspace.listFiles response value. */
+export const workspaceListFilesValueSchema = z.object({
+  paths: z.array(z.string()),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.listFiles'>>>
+
+/** workspace.read request payload. */
+export const workspaceReadRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  path: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.read'>>>
+
+/** workspace.read response value. */
+export const workspaceReadValueSchema = z.object({
+  data: z.string(),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.read'>>>

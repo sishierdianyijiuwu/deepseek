@@ -12,7 +12,10 @@ import {
   Accounts,
   accountId,
   runWithAccount,
+  type AccountLookup,
   type BanResult,
+  type OperatorAuditRecord,
+  type OperatorAuditWrite,
   type RegisterResult,
   type ResetPasswordResult,
   type SignInLookup,
@@ -64,6 +67,18 @@ class FakeAccounts extends Accounts {
   }
   override isRegistrationFrozen(): Promise<boolean> {
     return Promise.resolve(false)
+  }
+  override lookupByEmail(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override lookupById(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
+    return Promise.resolve({ id: 'audit-1', ...entry })
+  }
+  override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
+    return Promise.resolve([])
   }
 }
 

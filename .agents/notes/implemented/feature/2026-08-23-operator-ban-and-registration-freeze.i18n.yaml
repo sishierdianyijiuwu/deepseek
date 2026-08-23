@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-23-operator-ban-and-registration-freeze.md
-2026-08-23-operator-ban-and-registration-freeze.md: 593c1d5238e844f3c4aca45915eea77207a88eaa
-2026-08-23-operator-ban-and-registration-freeze.zh.md: f3517ad49102a4bc1c509ef21e4aaaed7eedbad0
+2026-08-23-operator-ban-and-registration-freeze.md: f6ee5e1865d27744e6301074e067db05216c60af
+2026-08-23-operator-ban-and-registration-freeze.zh.md: aa9445cb80649a02e6c5eade2ea4fee794521b1b

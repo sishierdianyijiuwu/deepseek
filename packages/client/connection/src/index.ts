@@ -5,10 +5,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import {
   SIGN_IN_COOKIE,
+  OPERATOR_ACCESS_HEADER,
   cookieValue,
   runWithAccount,
+  runWithOperatorAccess,
   signInSessionId,
   type AccountId,
+  type OperatorAccess,
 } from '@deepseek-ai/dsh-account'
 import type {} from '@deepseek-ai/dsh-attachment'
 // Activates the webServer Context merge used below.
@@ -192,13 +195,18 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         res.end('forbidden')
         return
       }
-      const account = await resolveApiAccount(ctx, req)
-      if (account === 'required') {
+      const identity = await resolveApiIdentity(ctx, req)
+      if (identity === 'required') {
         res.writeHead(401)
         res.end('unauthorized')
         return
       }
-      await runWithAccount(account, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
+      if (identity === 'forbidden') {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
+      await runApiIdentity(identity, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
@@ -223,23 +231,44 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   })
 }
 
+type ApiIdentity = AccountId | OperatorAccess | undefined
+
 /**
- * Resolve the signed-in Account for one `/api` request when Accounts are composed.
+ * Resolve the signed-in Account, and optional Operator access, for one `/api`
+ * request when Accounts are composed.
  * @param ctx - Host context that may carry `accounts`.
  * @param req - incoming HTTP or upgrade request.
- * @returns the Account id, `undefined` when Accounts are not composed, or
- *   `'required'` when they are composed and the cookie is missing or dead.
+ * @returns the identity, `undefined` when Accounts are not composed,
+ *   `'required'` when the cookie is missing or dead, or `'forbidden'` when a
+ *   non-Operator presents {@link OPERATOR_ACCESS_HEADER}.
  */
-async function resolveApiAccount(
+async function resolveApiIdentity(
   ctx: { get: Context['get'] },
   req: IncomingMessage,
-): Promise<AccountId | undefined | 'required'> {
+): Promise<ApiIdentity | 'required' | 'forbidden'> {
   const accounts = ctx.get('accounts')
   if (accounts === undefined) return undefined
   const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
   if (id === undefined) return 'required'
   const session = await accounts.lookupSignIn(signInSessionId(id))
-  return session === undefined ? 'required' : session.accountId
+  if (session === undefined) return 'required'
+  const raw = req.headers[OPERATOR_ACCESS_HEADER]
+  const targetEmail = Array.isArray(raw) ? raw[0] : raw
+  if (targetEmail === undefined || targetEmail === '') return session.accountId
+  if (!session.operator) return 'forbidden'
+  const target = await accounts.lookupByEmail(targetEmail)
+  if (target === undefined || target.accountId === session.accountId) return session.accountId
+  return {
+    operatorAccountId: session.accountId,
+    operatorEmail: session.email,
+    targetAccountId: target.accountId,
+  }
+}
+
+function runApiIdentity<T>(identity: ApiIdentity, fn: () => T): T {
+  if (identity === undefined) return fn()
+  if (typeof identity === 'string') return runWithAccount(identity, fn)
+  return runWithOperatorAccess(identity, fn)
 }
 
 /**
@@ -263,17 +292,21 @@ async function authorizeApiUpgrade(
     rejectWebSocketUpgrade(socket)
     return
   }
-  let account: AccountId | undefined | 'required'
+  let identity: ApiIdentity | 'required' | 'forbidden'
   try {
-    account = await resolveApiAccount(ctx, req)
+    identity = await resolveApiIdentity(ctx, req)
   } catch {
     // lookupSignIn I/O failed: close the duplex rather than leave it hanging.
     rejectUnauthorizedUpgrade(socket)
     return
   }
-  if (account === 'required') {
+  if (identity === 'required') {
     rejectUnauthorizedUpgrade(socket)
     return
   }
-  await runWithAccount(account, () => handle(req, socket, head))
+  if (identity === 'forbidden') {
+    rejectWebSocketUpgrade(socket)
+    return
+  }
+  await runApiIdentity(identity, () => handle(req, socket, head))
 }

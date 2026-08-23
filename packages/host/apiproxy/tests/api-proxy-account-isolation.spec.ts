@@ -6,8 +6,19 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { Accounts, accountId, runWithAccount } from '@deepseek-ai/dsh-account'
-import type { BanResult, RegisterResult, ResetPasswordResult, SignInLookup, SignInResult, SignInSessionId, VerifyEmailResult } from '@deepseek-ai/dsh-account'
+import { Accounts, accountId, runWithAccount, runWithOperatorAccess } from '@deepseek-ai/dsh-account'
+import type {
+  AccountLookup,
+  BanResult,
+  OperatorAuditRecord,
+  OperatorAuditWrite,
+  RegisterResult,
+  ResetPasswordResult,
+  SignInLookup,
+  SignInResult,
+  SignInSessionId,
+  VerifyEmailResult,
+} from '@deepseek-ai/dsh-account'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -62,6 +73,18 @@ class FakeAccounts extends Accounts {
   }
   override isRegistrationFrozen(): Promise<boolean> {
     return Promise.resolve(false)
+  }
+  override lookupByEmail(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override lookupById(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
+    return Promise.resolve({ id: 'audit-1', ...entry })
+  }
+  override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
+    return Promise.resolve([])
   }
 }
 
@@ -195,5 +218,49 @@ describe('Account-owned Sessions', () => {
     expect(history.result.ok).toBe(false)
     if (history.result.ok) throw new Error('unowned history must fail')
     expect(history.result.error.code).toBe('session-not-found')
+  })
+
+  it('lets Operator access read another Account and refuses prompt', async () => {
+    const { api } = await harness()
+    const created = await runWithAccount(accountA, () => api.sessions.create(request({})))
+    expect(created.result.ok).toBe(true)
+    if (!created.result.ok) throw new Error('create failed')
+    const sessionId = created.result.value.sessionId
+    const access = {
+      operatorAccountId: accountB,
+      operatorEmail: 'ops@example.com',
+      targetAccountId: accountA,
+    }
+
+    const listed = await runWithOperatorAccess(access, () => api.sessions.list(request({})))
+    expect(listed.result.ok).toBe(true)
+    if (!listed.result.ok) throw new Error('operator list failed')
+    expect(listed.result.value.items.map(item => item.sessionId)).toEqual([sessionId])
+
+    const history = await runWithOperatorAccess(access, () => api.sessions.history(request({ sessionId })))
+    expect(history.result.ok).toBe(true)
+
+    const prompt = await runWithOperatorAccess(access, () => api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'hi' }],
+    })))
+    expect(prompt.result.ok).toBe(false)
+    if (prompt.result.ok) throw new Error('operator prompt must fail')
+    expect(prompt.result.error.code).toBe('operator-access-readonly')
+
+    const credentials = await runWithOperatorAccess(access, () => api.credentials.describe(request({
+      refs: ['DEEPSEEK_API_KEY'],
+    })))
+    expect(credentials.result.ok).toBe(false)
+    if (credentials.result.ok) throw new Error('operator credential read must fail')
+    expect(credentials.result.error.code).toBe('operator-access-readonly')
+
+    const respond = await runWithOperatorAccess(access, () => api.respond({
+      type: 'client-response',
+      rpcId: request({}).rpcId,
+      result: { ok: true, value: {} },
+    }))
+    expect(respond).toEqual({ accepted: false, reason: 'not-pending' })
   })
 })
