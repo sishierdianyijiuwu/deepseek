@@ -5,7 +5,7 @@
 
 services:
   reverse-proxy:
-    image: caddy:2-alpine
+    image: caddy:2.10.2-alpine
     network_mode: host
     environment:
       DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-localhost}

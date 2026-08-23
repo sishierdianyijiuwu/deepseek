@@ -12,7 +12,7 @@ The hosted control plane is a public HTTPS product, but putting TLS inside dsh o
 
 **dsh keeps binding `127.0.0.1`.** The web flag parser still rejects `--host 0.0.0.0` before `webStartup` is published. The hosted profile uses those same flags.
 
-**HTTPS terminates at Caddy in front of that port.** [`packages/bundle/hosted/reverse-proxy/`](../../../../packages/bundle/hosted/reverse-proxy/Caddyfile) ships a Caddyfile that `reverse_proxy`s to `127.0.0.1:3080` and a compose file that runs Caddy with `network_mode: host` so the proxy can reach host loopback. dsh is not a compose service. Docker Desktop cannot use host networking that way; the cookbook runs Caddy on the host instead.
+**HTTPS terminates at Caddy in front of that port.** [`packages/bundle/hosted/reverse-proxy/`](../../../../packages/bundle/hosted/reverse-proxy/Caddyfile) ships a Caddyfile that `reverse_proxy`s to `127.0.0.1:3080` with `header_up Host {host}` so the upstream Host is the public hostname, not the loopback listen address, and a compose file that runs `caddy:2.10.2-alpine` with `network_mode: host` so the proxy can reach host loopback. dsh is not a compose service. Docker Desktop cannot use host networking that way; the cookbook runs Caddy on the host instead.
 
 **The public hostname is a `--trusted-host` plus `DSH_PUBLIC_BASE_URL` and `DSH_COOKIE_SECURE=1`.** The `/api` Host fence is still DNS-rebinding defense, not Account authentication. Unauthenticated `/api` through the proxy is `401 unauthorized`; a signed-in Account uses `/api` through the same proxy.
 
@@ -20,7 +20,7 @@ The hosted control plane is a public HTTPS product, but putting TLS inside dsh o
 
 ## Testing
 
-`packages/bundle/web-app/tests/startup.spec.ts` and `apps/cli/tests/built-bin.e2e.ts` still refuse `--host 0.0.0.0`. `packages/bundle/hosted/tests/reverse-proxy.spec.ts` pins the Caddyfile upstream and compose host-network. `packages/account/account-http/tests/session-isolation.http.spec.ts` drives unauthenticated and signed-in `/api` through a TLS reverse proxy onto loopback dsh.
+`packages/bundle/web-app/tests/startup.spec.ts` and `apps/cli/tests/built-bin.e2e.ts` still refuse `--host 0.0.0.0`. `packages/bundle/hosted/tests/reverse-proxy.spec.ts` pins the Caddyfile HTTPS site address, `header_up Host`, loopback upstream, and compose host-network plus image tag. `packages/account/account-http/tests/session-isolation.http.spec.ts` drives unauthenticated and signed-in `/api` through a TLS reverse proxy onto loopback dsh.
 
 ## Alternatives considered
 

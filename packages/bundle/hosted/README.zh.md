@@ -18,4 +18,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **不绑定 `0.0.0.0` 也不说 TLS** — webserver 监听 loopback；HTTPS 在该端口前面的反向代理处终止。
+- **不绑定 `0.0.0.0` 也不自身终止 TLS** — webserver 监听 loopback；HTTPS 在该端口前面的反向代理处终止。

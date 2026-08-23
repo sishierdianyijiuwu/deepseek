@@ -1,5 +1,8 @@
 # HTTPS terminates here. dsh stays HTTP on loopback (ADR 0015).
-# Caddy forwards the original Host so the /api DNS-rebinding fence sees the public hostname.
+# header_up Host keeps the public hostname on the upstream request so the /api
+# DNS-rebinding fence sees it rather than 127.0.0.1:3080.
 {$DSH_PUBLIC_HOST:localhost} {
-	reverse_proxy 127.0.0.1:3080
+	reverse_proxy 127.0.0.1:3080 {
+		header_up Host {host}
+	}
 }

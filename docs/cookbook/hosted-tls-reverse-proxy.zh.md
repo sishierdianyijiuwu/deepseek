@@ -2,7 +2,7 @@
 
 [English](hosted-tls-reverse-proxy.md) | 中文
 
-在 `dsh hosted` 前面接入 HTTPS，同时让 dsh 进程继续绑在 loopback（回环）上。TLS 在 Caddy 处终止；dsh 不对外说 TLS。决策见 [ADR 0015](../adr/0015-tls-at-proxy.zh.md)；[`dsh-hosted`](../../packages/bundle/hosted/README.zh.md) 拥有 Account 组合包以及随附的 [Caddyfile](../../packages/bundle/hosted/reverse-proxy/Caddyfile)。
+在 `dsh hosted` 前面接入 HTTPS，同时让 dsh 进程继续绑在 loopback（回环）上。TLS 在 Caddy 处终止；dsh 自身不终止 TLS。决策见 [ADR 0015](../adr/0015-tls-at-proxy.zh.md)；[`dsh-hosted`](../../packages/bundle/hosted/README.zh.md) 拥有 Account 组合包以及随附的 [Caddyfile](../../packages/bundle/hosted/reverse-proxy/Caddyfile)。
 
 前置条件：已构建的安装（在本检出目录运行 `pnpm run build`）、Caddy 2 或 Docker Compose，以及组合包 README 中的 hosted 环境变量（`DSH_POSTGRES_URL`、`DSH_PUBLIC_BASE_URL`、`DSH_SMTP_HOST`、`DSH_SMTP_FROM`）。
 
@@ -42,7 +42,7 @@ Caddy 在公开主机名上提供 HTTPS，并反向代理到 `http://127.0.0.1:3
 
 ## 3. 经代理检查 `/api`
 
-这些检查走 HTTPS。它们并不证明 dsh 自己会说 TLS。
+这些检查走 HTTPS。它们并不证明 dsh 自身终止 TLS。
 
 未认证的 `/api` 会被拒绝：
 

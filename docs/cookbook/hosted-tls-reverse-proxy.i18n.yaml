@@ -3,4 +3,4 @@
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/cookbook/hosted-tls-reverse-proxy.md
 hosted-tls-reverse-proxy.md: b182246dd68b86a1c0bd5b265fb8e3092a096498
-hosted-tls-reverse-proxy.zh.md: 2d1d6c1660006e6d4189eff5836b9b2ca45f6c73
+hosted-tls-reverse-proxy.zh.md: d0f00c12f4b77c758d5f51373ad68799c6a4f9a0
