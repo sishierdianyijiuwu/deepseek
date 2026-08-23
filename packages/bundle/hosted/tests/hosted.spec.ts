@@ -34,15 +34,30 @@ describe('dsh-hosted bundle', () => {
       patch => patch.insert ?? [],
     )
     const ids = rows.map(row => row.id)
-    expect(ids).toEqual(['mailer', 'accounts', 'cloud-workspaces', 'account-http', 'ui-account'])
+    expect(ids).toEqual(['e2b', 'mailer', 'accounts', 'cloud-workspaces', 'account-http', 'ui-account'])
     for (const row of rows) {
       expect(manifest.dependencies).toHaveProperty(row.name ?? '')
     }
-    const overrides = (parsed as { id?: string; name?: string }[]).filter(patch => patch.id !== undefined)
-    expect(overrides).toEqual([
-      { id: 'credentials', name: '@deepseek-ai/dsh-credentials-account' },
+    const overrides = (parsed as { id?: string; name?: string; disabled?: boolean }[])
+      .filter(patch => patch.id !== undefined)
+    expect(overrides.map(patch => patch.id)).toEqual([
+      'credentials',
+      'subprocess',
+      'fs-sandbox',
+      'bash-sandbox',
+      'sandbox',
+      'sandbox-policy',
+      'directory-picker',
     ])
+    expect(overrides.find(patch => patch.id === 'credentials')?.name).toBe('@deepseek-ai/dsh-credentials-account')
+    expect(overrides.find(patch => patch.id === 'subprocess')?.name).toBe('@deepseek-ai/dsh-subprocess-e2b')
+    expect(overrides.find(patch => patch.id === 'fs-sandbox')?.name).toBe('@deepseek-ai/dsh-fs-e2b')
+    expect(overrides.find(patch => patch.id === 'bash-sandbox')?.name).toBe('@deepseek-ai/dsh-bash-local')
+    expect(overrides.find(patch => patch.id === 'sandbox')?.disabled).toBe(true)
     expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-credentials-account')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-e2b')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-fs-e2b')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-subprocess-e2b')
   })
 })
 

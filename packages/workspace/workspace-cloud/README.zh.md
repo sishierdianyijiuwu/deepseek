@@ -8,7 +8,7 @@
 
 `createEmpty` 分配槽位 0..2；第四次创建抛出 `CloudWorkspaceLimitError`。`importPublicGit` 把公开 HTTPS git 远程（仅 `https:`、无 userinfo）克隆进 Account 前缀下尚未登记的目录，关闭凭据助手、禁止检出符号链接、禁止 HTTP 重定向，并带墙钟超时与目标目录体积轮询；超过 1 GiB 会中止克隆（`CloudWorkspaceQuotaError`）。仅在克隆与体积检查成功后才写入注册表行。私有远程、其他协议、取消、超时以及克隆失败抛出 `CloudWorkspaceImportUrlError`／`CloudWorkspaceImportError`，不会保留槽位。Import 始终落在调用方 Account 的命名空间下；没有写入另一个 Account 目录树的目标路径。`writeFile` 拒绝符号链接路径，因此植入的链接不能覆盖另一个 Account 的文件。启动时按路径把每一行 PostgreSQL 记录收养进 `workspaceRegistry`，因此即使 KV 被清空，持久目录仍会出现在列表中。`writeFile` 与 `deleteOwned` 共用一条按 Workspace 串行化的链；`writeFile` 会重新检查所有权、遍历目录树，并拒绝会使总量超过 1 GiB 的写入（`CloudWorkspaceQuotaError`）。`owns` / `listOwned` / `getOwned` / `deleteOwned` / `listFiles` / `readFile` 是 Host `/api` 使用的 Account 隔离检查。另一个 Account 的 id 表现为找不到，而不是单独的禁止错误。
 
-E2B 回拷是后续工单；它必须使用同一 1 GiB 上限（`writeFile` 或等价的树写入），而不是直接改写持久副本。在 E2B hydrate 成为摄入路径之前，Session cwd 上的本地工具写入也会绕过 `writeFile`。
+`hydrateInto` 把常规文件拷进执行世界的 cwd（跳过 `.dsh-e2b`）。`copyBackFrom` 通过同一 1 GiB 上限摄入远程目录树；超过上限抛出 `CloudWorkspaceQuotaError`，且不扩大持久副本。E2B 沙箱过期只删除沙箱。
 
 ## Model Experience
 
@@ -20,4 +20,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **没有 E2B hydrate / 回拷** — 执行世界同步是后续工单；1 GiB 上限在串行化的 `writeFile` 与 Import 克隆摄入上执行（包括克隆过程中的目标目录体积轮询）。Session cwd 上的工具写入不是这条摄入路径。
+- **此处不计每日 E2B 分钟** — hydrate 与回拷负责 1 GiB 摄入；UTC 日运行时长上限是后续工单。

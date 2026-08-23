@@ -8,7 +8,7 @@ Config `url` is a `postgres://` / `postgresql://` connection string, or `pglite:
 
 `createEmpty` assigns slot 0..2; a fourth create throws `CloudWorkspaceLimitError`. `importPublicGit` clones a public HTTPS git remote (`https:` only, no userinfo) into an unlisted directory under the Account prefix, with credential helpers off, checkout symlinks disabled, HTTP redirects denied, a wall-clock timeout, and dest-size polling; a tree past 1 GiB aborts the clone (`CloudWorkspaceQuotaError`). The registry row is created only after clone and the size check succeed. Private remotes, other schemes, cancel, timeout, and clone failures throw `CloudWorkspaceImportUrlError` / `CloudWorkspaceImportError` and do not keep a slot. Import always lands under the calling Account's namespace; there is no target path into another Account's tree. `writeFile` refuses a path that is a symlink, so a planted link cannot overwrite another Account's files. Startup adopts each PostgreSQL row into `workspaceRegistry` by path so a wiped KV store still lists the durable directories. `writeFile` and `deleteOwned` serialize on one per-Workspace chain; `writeFile` re-checks ownership, walks the tree, and refuses a write that would pass 1 GiB (`CloudWorkspaceQuotaError`). `owns` / `listOwned` / `getOwned` / `deleteOwned` / `listFiles` / `readFile` are the Account isolation checks the Host `/api` uses. Another Account's id is a miss, not a distinct forbidden error.
 
-E2B copy-back is a later ticket; it must use the same 1 GiB cap (`writeFile` or an equivalent tree ingest) rather than writing the durable copy directly. Local tool/cwd writes into the Session directory also bypass `writeFile` until E2B hydrate is the ingest path.
+`hydrateInto` copies regular files into an execution-world cwd (skipping `.dsh-e2b`). `copyBackFrom` ingests the remote tree through the same 1 GiB cap; a tree past the cap throws `CloudWorkspaceQuotaError` and does not grow the durable copy. E2B sandbox expiry deletes only the sandbox.
 
 ## Model Experience
 
@@ -20,4 +20,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **No E2B hydrate / copy-back** — execution-world sync is a later ticket; the 1 GiB cap is enforced on serialized `writeFile` and on Import clone ingest (including dest-size polling during clone). Session cwd tool writes are not this ingest.
+- **Daily E2B minutes are not counted here** — hydrate and copy-back own the 1 GiB ingest; the UTC-day runtime cap is a later ticket.

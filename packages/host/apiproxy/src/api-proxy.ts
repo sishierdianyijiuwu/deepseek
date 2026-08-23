@@ -46,7 +46,10 @@ import {
   MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
   redactGitUrl,
+  type ExecutionWorld,
 } from '@deepseek-ai/dsh-workspace-cloud'
+import type {} from '@deepseek-ai/dsh-e2b'
+import { ExecutingSessionBusyError } from '@deepseek-ai/dsh-e2b'
 // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
 import {
   InvalidPresetIdError, PresetExistsError, PresetMountError,
@@ -1155,6 +1158,121 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       })
     }
     return undefined
+  }
+
+  const executingCopyBack = new Set<SessionId>()
+
+  function familyRootId(sessionId: SessionId): SessionId {
+    let current = sessionId
+    const seen = new Set<SessionId>()
+    for (;;) {
+      if (seen.has(current)) return current
+      seen.add(current)
+      const session = ctx.sessions.get(current) ?? ctx.agents.get(current)?.session
+      const parent = session?.header.parentSession
+      if (parent === undefined) return current
+      current = parent
+    }
+  }
+
+  function workspaceForOwnedSession(accountId: AccountId, sessionId: SessionId): Workspace | undefined {
+    const cloud = ctx.get('cloudWorkspaces')
+    if (cloud === undefined) return undefined
+    const session = ctx.sessions.get(sessionId) ?? ctx.agents.get(sessionId)?.session
+    return cloud.listOwned(accountId).find(workspace =>
+      workspace.sessionIds.includes(sessionId)
+      || (session?.header.cwd !== undefined && workspace.path === session.header.cwd),
+    )
+  }
+
+  interface ExecutingBind {
+    account: AccountId
+    rootId: SessionId
+    workspace: Workspace
+    sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>
+    reused: boolean
+  }
+
+  /**
+   * Start the Account's E2B Executing Session and hydrate the durable Workspace.
+   * Extra prompts of the same family reuse the sandbox. A second family is refused.
+   */
+  async function startExecutingWorld<T>(
+    request: RpcRequest<unknown>,
+    agent: Agent,
+  ): Promise<{ refused: RpcResponse<T> } | { bind: ExecutingBind | undefined }> {
+    const e2b = ctx.get('e2b')
+    const cloud = ctx.get('cloudWorkspaces')
+    const account = currentAccountId()
+    if (e2b === undefined || !e2b.perExecutingSession || cloud === undefined || account === undefined) {
+      return { bind: undefined }
+    }
+    const rootId = familyRootId(agent.session.id)
+    const workspace = workspaceForOwnedSession(account, rootId)
+      ?? workspaceForOwnedSession(account, agent.session.id)
+    if (workspace === undefined) {
+      return {
+        refused: err(request, {
+          code: 'workspace-required',
+          message: 'an Executing Session requires a Workspace owned by this Account',
+          details: {},
+        }),
+      }
+    }
+    const reused = e2b.executingSessionId(account) === rootId
+    let sandbox
+    try {
+      sandbox = await e2b.startExecutingSession(account, rootId)
+    } catch (error: unknown) {
+      if (error instanceof ExecutingSessionBusyError) {
+        return {
+          refused: err(request, {
+            code: 'executing-session-busy',
+            message: error.message,
+            details: { sessionId: error.sessionId },
+          }),
+        }
+      }
+      throw error
+    }
+    if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+    return { bind: { account, rootId, workspace, sandbox, reused } }
+  }
+
+  function scheduleExecutingCopyBack(agent: Agent, bind: ExecutingBind): void {
+    const e2b = ctx.get('e2b')
+    const cloud = ctx.get('cloudWorkspaces')
+    if (e2b === undefined || cloud === undefined) return
+    if (bind.reused || executingCopyBack.has(bind.rootId) || typeof agent.whenIdle !== 'function') return
+    executingCopyBack.add(bind.rootId)
+    void (async () => {
+      try {
+        for (;;) {
+          await agent.whenIdle()
+          if (agent.status === 'running') continue
+          break
+        }
+        try {
+          await cloud.copyBackFrom(bind.account, bind.workspace.id, bind.sandbox as ExecutionWorld, e2b.cwd)
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceQuotaError) {
+            try {
+              agent.session.append('workspace/copy-back-failed', {
+                message: error.message,
+                maxBytes: MAX_WORKSPACE_BYTES,
+              })
+            } catch (_copyBackNoticeFailed) {
+              // The quota refusal already left the durable copy unchanged.
+            }
+          } else {
+            throw error
+          }
+        }
+      } finally {
+        executingCopyBack.delete(bind.rootId)
+        await e2b.stopExecutingSession(bind.account, bind.rootId)
+      }
+    })()
   }
 
   function workspaceRegistry() {
@@ -2649,6 +2767,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const missing = await refuseMissingCredential<{ accepted: true }>(request)
         if (missing !== undefined) return missing
         const agent = resolved.agent
+        const executing = await startExecutingWorld<{ accepted: true }>(request, agent)
+        if ('refused' in executing) return executing.refused
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',
@@ -2673,6 +2793,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             const message: UserMessage = createUserMessage({ content: durable, source })
             if (mode === 'steer') agent.steer(message)
             else agent.followup(message)
+            if (executing.bind !== undefined) scheduleExecutingCopyBack(agent, executing.bind)
           } catch (error: unknown) {
             if (error instanceof AttachmentError) {
               return err(request, {
@@ -2985,6 +3106,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           parentSessionId, childSessionId, mode: 'continuable',
         }, signal)
         if (verified.error !== undefined) return err(request, verified.error)
+        const executing = await startExecutingWorld<SubagentPromptReceipt>(request, parent)
+        if ('refused' in executing) return executing.refused
         try {
           const messageId = await ctx.subagents.followup(parent, childSessionId, content, {
             source: {
@@ -2994,6 +3117,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             },
             signal,
           })
+          if (executing.bind !== undefined) scheduleExecutingCopyBack(parent, executing.bind)
           return ok(request, { messageId })
         } catch (error: unknown) {
           return subagentPromptError(request, error, signal)

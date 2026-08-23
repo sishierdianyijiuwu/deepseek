@@ -4,7 +4,7 @@
  */
 
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** v1 cap: 1 GiB of file bytes per Workspace (ADR 0009). */
@@ -198,6 +198,42 @@ export async function readWorkspaceFile(root: string, relativePath: string): Pro
   }
   if (!info.isFile()) throw new CloudWorkspacePathError(relativePath)
   return readFile(full)
+}
+
+/**
+ * Replace the durable Workspace tree with `files` after refusing a tree past 1 GiB.
+ * The durable directory is not modified when the incoming tree exceeds the cap.
+ * @param root - canonical Workspace directory.
+ * @param files - POSIX-relative regular files and their bytes.
+ */
+export async function ingestWorkspaceTree(
+  root: string,
+  files: ReadonlyArray<{ relativePath: string; data: Uint8Array }>,
+): Promise<void> {
+  const unique = new Map<string, Uint8Array>()
+  let total = 0
+  for (const file of files) {
+    resolveWorkspaceFile(root, file.relativePath)
+    const previous = unique.get(file.relativePath)
+    if (previous !== undefined) total -= previous.byteLength
+    unique.set(file.relativePath, file.data)
+    total += file.data.byteLength
+  }
+  if (total > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, total)
+  const keep = new Set(unique.keys())
+  const existing = await listWorkspaceFiles(root)
+  for (const relativePath of existing) {
+    if (keep.has(relativePath)) continue
+    const full = resolveWorkspaceFile(root, relativePath)
+    try {
+      await unlink(full)
+    } catch (error: unknown) {
+      if ((error as { code?: string }).code !== 'ENOENT') throw error
+    }
+  }
+  for (const [relativePath, data] of unique) {
+    await writeWorkspaceFile(root, relativePath, data)
+  }
 }
 
 async function collectWorkspaceFiles(dir: string, prefix: string, out: string[]): Promise<void> {

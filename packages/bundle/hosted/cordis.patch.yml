@@ -2,14 +2,45 @@
 # Credentials, cloud Workspaces, and the register / sign-in / password-reset
 # UI over dsh-base + dsh-web-app. Local `dsh web` does not apply this layer.
 # Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST /
-# DSH_SMTP_FROM / DSH_WORKSPACE_ROOT fail loud at load.
+# DSH_SMTP_FROM / DSH_WORKSPACE_ROOT / E2B_API_KEY fail loud at load.
 
 # Replace the process-wide home YAML: a hosted Account must not resolve
 # another Account's secret or a platform DEEPSEEK_API_KEY.
 - id: credentials
   name: '@deepseek-ai/dsh-credentials-account'
 
+# Tool filesystem and bash run in E2B, not as the control-plane OS user.
+# The platform E2B_API_KEY configures the host SDK only and is never
+# installed inside a sandbox. Missing E2B_API_KEY fails at load.
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-e2b'
+
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-e2b'
+
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-local'
+  config:
+    timeoutMs: 60000
+
+- id: sandbox
+  disabled: true
+
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: danger-full-access
+    workspaceRoot: /home/user/workspace
+
 - insert:
+    - id: e2b
+      name: '@deepseek-ai/dsh-e2b'
+      config:
+        apiKey: !!js process.env.E2B_API_KEY
+        cwd: /home/user/workspace
+        timeoutMs: !!js Number(process.env.DSH_E2B_TIMEOUT_MS || 3600000)
+        perExecutingSession: true
+
     - id: mailer
       name: '@deepseek-ai/dsh-mailer-smtp'
       config:

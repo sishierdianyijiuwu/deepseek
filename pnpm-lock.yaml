@@ -819,6 +819,9 @@ importers:
       '@deepseek-ai/dsh-client-connection':
         specifier: workspace:^
         version: link:../../client/connection
+      '@deepseek-ai/dsh-e2b':
+        specifier: workspace:^
+        version: link:../../e2b/e2b
       '@deepseek-ai/dsh-host-apiproxy':
         specifier: workspace:^
         version: link:../../host/apiproxy
@@ -1413,15 +1416,30 @@ importers:
       '@deepseek-ai/dsh-account-postgres':
         specifier: workspace:^
         version: link:../../account/account-postgres
+      '@deepseek-ai/dsh-bash-local':
+        specifier: workspace:^
+        version: link:../../shell/bash-local
       '@deepseek-ai/dsh-client-ui-account':
         specifier: workspace:^
         version: link:../../client/ui-account
       '@deepseek-ai/dsh-credentials-account':
         specifier: workspace:^
         version: link:../../credentials/credentials-account
+      '@deepseek-ai/dsh-e2b':
+        specifier: workspace:^
+        version: link:../../e2b/e2b
+      '@deepseek-ai/dsh-fs-e2b':
+        specifier: workspace:^
+        version: link:../../e2b/fs-e2b
       '@deepseek-ai/dsh-mailer-smtp':
         specifier: workspace:^
         version: link:../../account/mailer-smtp
+      '@deepseek-ai/dsh-sandbox-policy':
+        specifier: workspace:^
+        version: link:../../sandbox/sandbox-policy
+      '@deepseek-ai/dsh-subprocess-e2b':
+        specifier: workspace:^
+        version: link:../../e2b/subprocess-e2b
       '@deepseek-ai/dsh-workspace-cloud':
         specifier: workspace:^
         version: link:../../workspace/workspace-cloud
@@ -4150,6 +4168,12 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-account':
+        specifier: workspace:^
+        version: link:../../account/account
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
@@ -4159,6 +4183,9 @@ importers:
       '@deepseek-ai/dsh-sandbox-policy':
         specifier: workspace:^
         version: link:../../sandbox/sandbox-policy
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
 
   packages/e2b/fs-e2b:
     devDependencies:
@@ -5265,6 +5292,9 @@ importers:
       '@deepseek-ai/dsh-credentials':
         specifier: workspace:^
         version: link:../../credentials/credentials
+      '@deepseek-ai/dsh-e2b':
+        specifier: workspace:^
+        version: link:../../e2b/e2b
       '@deepseek-ai/dsh-goal':
         specifier: workspace:^
         version: link:../../goal/goal
@@ -8978,6 +9008,9 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
       '@deepseek-ai/dsh-storage':
         specifier: workspace:^
         version: link:../../storage/storage
