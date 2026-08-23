@@ -202,7 +202,9 @@ export async function readWorkspaceFile(root: string, relativePath: string): Pro
 
 /**
  * Replace the durable Workspace tree with `files` after refusing a tree past 1 GiB.
- * The durable directory is not modified when the incoming tree exceeds the cap.
+ * Incoming bytes above the cap throw before any unlink or write. A legal tree
+ * unlinks the previous regular files, then writes, so leftover files cannot
+ * trip a per-file size check.
  * @param root - canonical Workspace directory.
  * @param files - POSIX-relative regular files and their bytes.
  */
@@ -220,10 +222,8 @@ export async function ingestWorkspaceTree(
     total += file.data.byteLength
   }
   if (total > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, total)
-  const keep = new Set(unique.keys())
   const existing = await listWorkspaceFiles(root)
   for (const relativePath of existing) {
-    if (keep.has(relativePath)) continue
     const full = resolveWorkspaceFile(root, relativePath)
     try {
       await unlink(full)
@@ -232,7 +232,9 @@ export async function ingestWorkspaceTree(
     }
   }
   for (const [relativePath, data] of unique) {
-    await writeWorkspaceFile(root, relativePath, data)
+    const full = resolveWorkspaceFile(root, relativePath)
+    await mkdir(dirname(full), { recursive: true })
+    await writeNoFollow(full, relativePath, data)
   }
 }
 

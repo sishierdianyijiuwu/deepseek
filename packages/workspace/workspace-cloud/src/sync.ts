@@ -17,8 +17,9 @@ import {
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
-     * Copy-back of the execution-world tree into the durable Workspace was
-     * refused (the 1 GiB cap). The durable copy is unchanged. Log-only.
+     * Copy-back of the execution-world tree into the durable Workspace failed.
+     * Quota refusals leave the durable copy unchanged; other failures may be
+     * partial. Log-only.
      */
     'workspace/copy-back-failed': { message: string; maxBytes: number }
   }

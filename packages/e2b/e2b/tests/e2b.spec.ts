@@ -329,6 +329,32 @@ describe('E2BRuntime', () => {
     await fiber.dispose()
   })
 
+  it('serializes two starts after stop so a second Session cannot open a second sandbox', async () => {
+    const first = fakeSandbox('one')
+    const second = fakeSandbox('two')
+    const third = fakeSandbox('three')
+    sdk.create
+      .mockResolvedValueOnce(first.sandbox)
+      .mockResolvedValueOnce(second.sandbox)
+      .mockResolvedValueOnce(third.sandbox)
+    const ctx = new Context()
+    const account = accountId('account-serial')
+    const fiber = await ctx.plugin(E2BRuntime, { apiKey: 'test-key', perExecutingSession: true })
+    await ctx.e2b.startExecutingSession(account, SessionId('s1'))
+    await ctx.e2b.stopExecutingSession(account, SessionId('s1'))
+    const results = await Promise.allSettled([
+      ctx.e2b.startExecutingSession(account, SessionId('s2')),
+      ctx.e2b.startExecutingSession(account, SessionId('s3')),
+    ])
+    const fulfilled = results.filter(result => result.status === 'fulfilled')
+    const rejected = results.filter(result => result.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(ExecutingSessionBusyError)
+    expect(sdk.create).toHaveBeenCalledTimes(2)
+    await fiber.dispose()
+  })
+
   it('does not keep an Executing Session slot when sandbox setup fails', async () => {
     const fixture = fakeSandbox()
     fixture.makeDir.mockRejectedValueOnce(new Error('setup failed'))

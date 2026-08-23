@@ -1161,6 +1161,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   const executingCopyBack = new Set<SessionId>()
+  const executingHolds = new Map<SessionId, number>()
+  const executingDrains = new Set<Promise<void>>()
+
+  if (ctx.get('e2b')?.perExecutingSession === true) {
+    ctx.effect(() => async () => {
+      await Promise.all([...executingDrains])
+    }, 'hosted executing-session copy-back drain')
+  }
 
   function familyRootId(sessionId: SessionId): SessionId {
     let current = sessionId
@@ -1191,6 +1199,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     workspace: Workspace
     sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>
     reused: boolean
+  }
+
+  function addExecutingHold(rootId: SessionId): void {
+    executingHolds.set(rootId, (executingHolds.get(rootId) ?? 0) + 1)
+  }
+
+  function releaseExecutingHold(rootId: SessionId): void {
+    const held = executingHolds.get(rootId) ?? 0
+    if (held <= 1) executingHolds.delete(rootId)
+    else executingHolds.set(rootId, held - 1)
+  }
+
+  function runningFamilyAgents(rootId: SessionId): Agent[] {
+    return ctx.agents.list().filter(agent =>
+      agent.status === 'running' && familyRootId(agent.session.id) === rootId,
+    )
+  }
+
+  function familyBusy(rootId: SessionId): boolean {
+    return (executingHolds.get(rootId) ?? 0) > 0 || runningFamilyAgents(rootId).length > 0
+  }
+
+  async function whenFamilyIdle(rootId: SessionId): Promise<void> {
+    for (;;) {
+      const running = runningFamilyAgents(rootId)
+      if (running.length === 0) return
+      await Promise.all(running.map(agent =>
+        typeof agent.whenIdle === 'function' ? agent.whenIdle() : Promise.resolve(),
+      ))
+    }
   }
 
   /**
@@ -1235,44 +1273,72 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       }
       throw error
     }
-    if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+    addExecutingHold(rootId)
+    try {
+      if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+    } catch (error: unknown) {
+      releaseExecutingHold(rootId)
+      await e2b.stopExecutingSession(account, rootId)
+      throw error
+    }
     return { bind: { account, rootId, workspace, sandbox, reused } }
+  }
+
+  async function abandonExecutingWorld(bind: ExecutingBind): Promise<void> {
+    const e2b = ctx.get('e2b')
+    releaseExecutingHold(bind.rootId)
+    if (e2b === undefined) return
+    if (bind.reused || executingCopyBack.has(bind.rootId) || familyBusy(bind.rootId)) return
+    await e2b.stopExecutingSession(bind.account, bind.rootId, {
+      skipIf: () => familyBusy(bind.rootId),
+    })
   }
 
   function scheduleExecutingCopyBack(agent: Agent, bind: ExecutingBind): void {
     const e2b = ctx.get('e2b')
     const cloud = ctx.get('cloudWorkspaces')
+    releaseExecutingHold(bind.rootId)
     if (e2b === undefined || cloud === undefined) return
-    if (bind.reused || executingCopyBack.has(bind.rootId) || typeof agent.whenIdle !== 'function') return
+    if (executingCopyBack.has(bind.rootId)) return
     executingCopyBack.add(bind.rootId)
-    void (async () => {
+    const drain = (async () => {
       try {
         for (;;) {
-          await agent.whenIdle()
-          if (agent.status === 'running') continue
-          break
-        }
-        try {
-          await cloud.copyBackFrom(bind.account, bind.workspace.id, bind.sandbox as ExecutionWorld, e2b.cwd)
-        } catch (error: unknown) {
-          if (error instanceof CloudWorkspaceQuotaError) {
+          await whenFamilyIdle(bind.rootId)
+          if (familyBusy(bind.rootId)) continue
+          try {
+            await cloud.copyBackFrom(
+              bind.account,
+              bind.workspace.id,
+              bind.sandbox as ExecutionWorld,
+              e2b.cwd,
+            )
+          } catch (error: unknown) {
             try {
               agent.session.append('workspace/copy-back-failed', {
-                message: error.message,
+                message: error instanceof Error ? error.message : String(error),
                 maxBytes: MAX_WORKSPACE_BYTES,
               })
             } catch (_copyBackNoticeFailed) {
-              // The quota refusal already left the durable copy unchanged.
+              // Durable copy-back already failed; the session notice is best-effort.
             }
-          } else {
-            throw error
+            ctx.logger.warn(
+              `executing session copy-back failed: ${error instanceof Error ? error.message : String(error)}`,
+            )
           }
+          if (familyBusy(bind.rootId)) continue
+          await e2b.stopExecutingSession(bind.account, bind.rootId, {
+            skipIf: () => familyBusy(bind.rootId),
+          })
+          if (familyBusy(bind.rootId) || e2b.executingSessionId(bind.account) === bind.rootId) continue
+          return
         }
       } finally {
         executingCopyBack.delete(bind.rootId)
-        await e2b.stopExecutingSession(bind.account, bind.rootId)
       }
     })()
+    executingDrains.add(drain)
+    void drain.finally(() => { executingDrains.delete(drain) })
   }
 
   function workspaceRegistry() {
@@ -2767,8 +2833,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const missing = await refuseMissingCredential<{ accepted: true }>(request)
         if (missing !== undefined) return missing
         const agent = resolved.agent
-        const executing = await startExecutingWorld<{ accepted: true }>(request, agent)
-        if ('refused' in executing) return executing.refused
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',
@@ -2790,10 +2854,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               }
             }
             const durable = await durablePromptContent(ctx, content)
-            const message: UserMessage = createUserMessage({ content: durable, source })
-            if (mode === 'steer') agent.steer(message)
-            else agent.followup(message)
-            if (executing.bind !== undefined) scheduleExecutingCopyBack(agent, executing.bind)
+            const executing = await startExecutingWorld<{ accepted: true }>(request, agent)
+            if ('refused' in executing) return executing.refused
+            try {
+              const message: UserMessage = createUserMessage({ content: durable, source })
+              if (mode === 'steer') agent.steer(message)
+              else agent.followup(message)
+              if (executing.bind !== undefined) scheduleExecutingCopyBack(agent, executing.bind)
+            } catch (error: unknown) {
+              if (executing.bind !== undefined) await abandonExecutingWorld(executing.bind)
+              throw error
+            }
           } catch (error: unknown) {
             if (error instanceof AttachmentError) {
               return err(request, {
@@ -3117,9 +3188,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             },
             signal,
           })
-          if (executing.bind !== undefined) scheduleExecutingCopyBack(parent, executing.bind)
+          if (executing.bind !== undefined) {
+            const child = ctx.agents.get(childSessionId)
+            scheduleExecutingCopyBack(child ?? parent, executing.bind)
+          }
           return ok(request, { messageId })
         } catch (error: unknown) {
+          if (executing.bind !== undefined) await abandonExecutingWorld(executing.bind)
           return subagentPromptError(request, error, signal)
         }
       },

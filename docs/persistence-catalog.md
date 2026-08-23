@@ -1014,10 +1014,11 @@ Source: [`packages/web/web-search-deepseek/src/provider.ts:83`](../packages/web/
 
 ```ts persistence-catalog
 /**
- * Copy-back of the execution-world tree into the durable Workspace was
- * refused (the 1 GiB cap). The durable copy is unchanged. Log-only.
+ * Copy-back of the execution-world tree into the durable Workspace failed.
+ * Quota refusals leave the durable copy unchanged; other failures may be
+ * partial. Log-only.
  */
 'workspace/copy-back-failed': { message: string; maxBytes: number }
 ```
 
-Source: [`packages/workspace/workspace-cloud/src/sync.ts:23`](../packages/workspace/workspace-cloud/src/sync.ts)
+Source: [`packages/workspace/workspace-cloud/src/sync.ts:24`](../packages/workspace/workspace-cloud/src/sync.ts)

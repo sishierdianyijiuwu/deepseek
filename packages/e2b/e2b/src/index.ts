@@ -119,6 +119,7 @@ export class E2BRuntime extends Service {
   private readonly config: ResolvedConfig
   private readonly ready: Promise<Sandbox> | undefined
   private readonly slots = new Map<AccountId, ExecutingSlot>()
+  private readonly accountChains = new Map<AccountId, Promise<unknown>>()
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -192,14 +193,50 @@ export class E2BRuntime extends Service {
    */
   async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<Sandbox> {
     if (!this.perExecutingSession) return this.getSandbox()
+    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId))
+  }
+
+  /**
+   * Copy-back callers then kill this Account's sandbox. The durable Workspace
+   * is not deleted. Missing or already-expired sandboxes are quiescence.
+   * @param accountId - owning Account.
+   * @param sessionId - Session that holds the lock; a mismatch is ignored.
+   * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+   */
+  async stopExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { skipIf?: () => boolean },
+  ): Promise<void> {
+    return this.enqueueAccount(accountId, async () => {
+      const slot = this.slots.get(accountId)
+      if (slot === undefined || slot.sessionId !== sessionId) return
+      if (opts?.skipIf?.() === true) return
+      await this.killSlot(accountId)
+    })
+  }
+
+  /**
+   * The Session that currently holds this Account's Executing Session lock.
+   * @param accountId - owning Account.
+   * @returns the locked Session id, or `undefined`.
+   */
+  executingSessionId(accountId: AccountId): SessionId | undefined {
+    const slot = this.slots.get(accountId)
+    return slot?.state === 'live' ? slot.sessionId : undefined
+  }
+
+  private enqueueAccount<T>(accountId: AccountId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.accountChains.get(accountId) ?? Promise.resolve()
+    const run = previous.then(operation, operation)
+    this.accountChains.set(accountId, run.then(() => undefined, () => undefined))
+    return run
+  }
+
+  private async startExecutingSessionLocked(accountId: AccountId, sessionId: SessionId): Promise<Sandbox> {
     if (this.disposed) throw new Error('E2B sandbox service is disposing')
-    for (;;) {
-      const existing = this.slots.get(accountId)
-      if (existing === undefined) break
-      if (existing.state === 'stopping') {
-        await existing.stop
-        continue
-      }
+    const existing = this.slots.get(accountId)
+    if (existing !== undefined && existing.state === 'live') {
       if (existing.sessionId !== sessionId) throw new ExecutingSessionBusyError(existing.sessionId)
       const sandbox = await existing.sandbox
       if (this.disposed) throw new Error('E2B sandbox service is disposing')
@@ -224,28 +261,6 @@ export class E2BRuntime extends Service {
       if (slot?.sandbox === sandbox) this.slots.delete(accountId)
       throw error
     }
-  }
-
-  /**
-   * Copy-back callers then kill this Account's sandbox. The durable Workspace
-   * is not deleted. Missing or already-expired sandboxes are quiescence.
-   * @param accountId - owning Account.
-   * @param sessionId - Session that holds the lock; a mismatch is ignored.
-   */
-  async stopExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<void> {
-    const slot = this.slots.get(accountId)
-    if (slot === undefined || slot.sessionId !== sessionId) return
-    await this.killSlot(accountId)
-  }
-
-  /**
-   * The Session that currently holds this Account's Executing Session lock.
-   * @param accountId - owning Account.
-   * @returns the locked Session id, or `undefined`.
-   */
-  executingSessionId(accountId: AccountId): SessionId | undefined {
-    const slot = this.slots.get(accountId)
-    return slot?.state === 'live' ? slot.sessionId : undefined
   }
 
   private async sandboxForInitiator(): Promise<Sandbox> {

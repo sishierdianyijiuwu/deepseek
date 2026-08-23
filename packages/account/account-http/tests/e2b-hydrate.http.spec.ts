@@ -142,30 +142,36 @@ class FakeCredentials extends Service {
 class FakeE2B extends Service {
   readonly perExecutingSession = true
   readonly cwd = '/home/user/workspace'
-  private slot: { accountId: AccountId; sessionId: SessionId } | undefined
+  private readonly slots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
 
   constructor(ctx: Context) {
     super(ctx, 'e2b')
-    currentWorld = createRemoteWorld()
   }
 
   async startExecutingSession(accountId: AccountId, sessionId: SessionId) {
-    if (this.slot !== undefined && this.slot.sessionId !== sessionId) {
-      throw new ExecutingSessionBusyError(this.slot.sessionId)
+    const existing = this.slots.get(accountId)
+    if (existing !== undefined && existing.sessionId !== sessionId) {
+      throw new ExecutingSessionBusyError(existing.sessionId)
     }
-    this.slot = { accountId, sessionId }
-    const world = currentWorld
-    if (world === undefined) throw new Error('fake E2B world missing')
+    const world = existing?.world ?? createRemoteWorld()
+    this.slots.set(accountId, { sessionId, world })
     world.created += 1
+    currentWorld = world
     return world.world
   }
 
-  async stopExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<void> {
-    if (this.slot?.accountId === accountId && this.slot.sessionId === sessionId) this.slot = undefined
+  async stopExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { skipIf?: () => boolean },
+  ): Promise<void> {
+    if (opts?.skipIf?.() === true) return
+    const existing = this.slots.get(accountId)
+    if (existing?.sessionId === sessionId) this.slots.delete(accountId)
   }
 
   executingSessionId(accountId: AccountId): SessionId | undefined {
-    return this.slot?.accountId === accountId ? this.slot.sessionId : undefined
+    return this.slots.get(accountId)?.sessionId
   }
 }
 
@@ -195,13 +201,17 @@ class IsolatedApiProxy extends Service {
         Object.assign(agent, {
           id: session.id,
           session,
-          get status() { return live.status },
           ctx: agentCtx,
           inbox: { nextTurn: [], nextStep: [] },
           cancel: () => undefined,
           followup: () => { live.status = 'running' },
           steer: () => { live.status = 'running' },
           whenIdle: () => idle.promise.then(() => { live.status = 'idle' }),
+        })
+        Object.defineProperty(agent, 'status', {
+          get: () => live.status,
+          enumerable: true,
+          configurable: true,
         })
         await options.setup?.(agentCtx)
         ctx.agents.register(agent)
@@ -431,6 +441,41 @@ describe('E2B Executing Session over HTTP', () => {
     })
     expect((promptB.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
     if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
+  })
+
+  it('lets two Accounts execute at once', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jarA = await signInAccount(harness, 'dual-a@example.com', password)
+    const jarB = await signInAccount(harness, 'dual-b@example.com', password)
+    const wsA = await rpc(harness, jarA, 'workspace.create', { title: 'A' })
+    const wsB = await rpc(harness, jarB, 'workspace.create', { title: 'B' })
+    const workspaceA = (wsA.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    const workspaceB = (wsB.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    const sessionA = (await rpc(harness, jarA, 'session.create', { workspaceId: workspaceA }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionB = (await rpc(harness, jarB, 'session.create', { workspaceId: workspaceB }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const promptA = await rpc(harness, jarA, 'session.prompt', {
+      sessionId: sessionA.result?.value?.sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'a' }],
+    })
+    const promptB = await rpc(harness, jarB, 'session.prompt', {
+      sessionId: sessionB.result?.value?.sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'b' }],
+    })
+    expect((promptA.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    expect((promptB.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const idA = sessionA.result?.value?.sessionId
+    const idB = sessionB.result?.value?.sessionId
+    if (idA !== undefined) idleGates.get(idA)?.resolve(undefined)
+    if (idB !== undefined) idleGates.get(idB)?.resolve(undefined)
   })
 
   it('refuses copy-back past 1 GiB without growing the durable copy', {
