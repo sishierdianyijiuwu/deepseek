@@ -1,6 +1,7 @@
 /**
  * Account gate plugin, browser half: occupies `shell.overlay` with register,
- * sign-in, verification notice, and sign-out. Auth HTTP lives beside `/api`.
+ * sign-in, verification notice, password reset, and sign-out. Auth HTTP lives
+ * beside `/api`.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -43,9 +44,13 @@ export interface AccountGateInjected {
   signOut: () => Promise<AuthResult>
   /** POST `/auth/resend-verification`. */
   resend: (email: string) => Promise<AuthResult>
-  /** Current `location.search` (verification redirect query). */
+  /** POST `/auth/request-password-reset`. */
+  requestPasswordReset: (email: string) => Promise<AuthResult>
+  /** POST `/auth/reset-password`. */
+  resetPassword: (token: string, password: string) => Promise<AuthResult>
+  /** Current `location.search` (verification or reset redirect query). */
   getSearch: () => string
-  /** Drop the verification query after it has been shown. */
+  /** Drop the verification or reset query after it has been shown. */
   replaceSearch: () => void
 }
 
@@ -70,6 +75,8 @@ export function apply(ctx: ClientContext): void {
       signIn: (email, password) => postJson('/auth/sign-in', { email, password }),
       signOut: () => postJson('/auth/sign-out', {}),
       resend: email => postJson('/auth/resend-verification', { email }),
+      requestPasswordReset: email => postJson('/auth/request-password-reset', { email }),
+      resetPassword: (token, password) => postJson('/auth/reset-password', { token, password }),
       getSearch: () => window.location.search,
       replaceSearch: () => {
         const url = new URL(window.location.href)

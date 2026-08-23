@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { Mailer, type MailMessage } from '@deepseek-ai/dsh-mailer'
@@ -8,6 +8,10 @@ import { isUniqueViolation, openSql } from '../src/sql.ts'
 import * as PostgresInvariant from '../src/invariant.ts'
 
 const mailbox: MailMessage[] = []
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 class SilentMailer extends Mailer {
   override async send(message: MailMessage): Promise<void> {
@@ -28,7 +32,7 @@ describe('sql adapter', () => {
     const sql = await openSql('pglite:')
     await ensureSchema(sql)
     await ensureSchema(sql)
-    expect(SCHEMA_VERSION).toBe(1)
+    expect(SCHEMA_VERSION).toBe(2)
     const nested = await sql.transaction(async (inner) => {
       await inner.close()
       await inner.transaction(async nestedInner => nestedInner.query('SELECT 1 AS x'))
@@ -74,6 +78,60 @@ describe('postgres accounts', () => {
     if (!signedIn.ok) return
     await new Promise(resolve => setTimeout(resolve, 30))
     await expect(accounts.lookupSignIn(signedIn.signInId)).resolves.toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('slides a live Sign-in session and reset ends every session', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    let nowMs = 1_700_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+      signInTtlMs: 100,
+      passwordResetTtlMs: 50,
+    }).await()
+    const accounts = ctx.accounts
+    await accounts.register('owner@example.com', 'password12')
+    const verifyToken = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(verifyToken).toBeDefined()
+    await expect(accounts.verifyEmail(verifyToken!)).resolves.toEqual({ ok: true })
+
+    const first = await accounts.signIn('owner@example.com', 'password12')
+    const second = await accounts.signIn('owner@example.com', 'password12')
+    expect(first.ok && second.ok).toBe(true)
+    if (!first.ok || !second.ok) return
+    nowMs += 80
+    const slid = await accounts.lookupSignIn(first.signInId)
+    expect(slid?.expiresAt).toBe(nowMs + 100)
+    nowMs += 80
+    await expect(accounts.lookupSignIn(first.signInId)).resolves.toMatchObject({ email: 'owner@example.com' })
+
+    await accounts.requestPasswordReset('nobody@example.com')
+    await accounts.requestPasswordReset('owner@example.com')
+    const resetToken = /\/reset\?token=([0-9a-f]+)/.exec(mailbox.at(-1)?.text ?? '')?.[1]
+    expect(resetToken).toBeDefined()
+    await expect(accounts.resetPassword(resetToken!, 'short')).resolves.toEqual({
+      ok: false,
+      error: 'invalid_password',
+    })
+    await expect(accounts.resetPassword(resetToken!, 'password99')).resolves.toEqual({ ok: true })
+    await expect(accounts.lookupSignIn(first.signInId)).resolves.toBeUndefined()
+    await expect(accounts.lookupSignIn(second.signInId)).resolves.toBeUndefined()
+    await expect(accounts.signIn('owner@example.com', 'password12')).resolves.toEqual({
+      ok: false,
+      error: 'invalid_credentials',
+    })
+    await expect(accounts.resetPassword(resetToken!, 'password99')).resolves.toEqual({
+      ok: false,
+      error: 'invalid_or_expired',
+    })
+    await expect(accounts.resetPassword('', 'password99')).resolves.toEqual({
+      ok: false,
+      error: 'invalid_or_expired',
+    })
     await ctx.fiber.dispose()
   })
 })

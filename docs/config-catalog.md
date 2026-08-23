@@ -39,18 +39,20 @@ export interface Config {
    * in-process PostgreSQL engine used by tests.
    */
   url: string
-  /** Origin used to build verification URLs (no trailing slash). */
+  /** Origin used to build verification and password-reset URLs (no trailing slash). */
   publicBaseUrl: string
   /** Verification-token lifetime in milliseconds. */
   verificationTtlMs?: number
   /** Sign-in session lifetime in milliseconds. */
   signInTtlMs?: number
+  /** Password-reset token lifetime in milliseconds. */
+  passwordResetTtlMs?: number
   /** Minimum accepted Password length. */
   passwordMinLength?: number
 }
 ```
 
-Source: [`packages/account/account-postgres/src/index.ts:40`](../packages/account/account-postgres/src/index.ts)
+Source: [`packages/account/account-postgres/src/index.ts:43`](../packages/account/account-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-acp"></a>
 

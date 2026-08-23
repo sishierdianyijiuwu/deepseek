@@ -17,6 +17,8 @@ function setup(overrides: Partial<AccountGateProps> = {}) {
     signIn: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     signOut: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     resend: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
+    requestPasswordReset: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
+    resetPassword: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     getSearch: () => '',
     replaceSearch: vi.fn(),
     ...overrides,
@@ -178,5 +180,68 @@ describe('AccountGate', () => {
     expect(signIn).toHaveBeenCalledTimes(1)
     resolveSignIn({ ok: true })
     await waitFor(() => { expect(screen.getByText('已登录 a@b.c')).toBeTruthy() })
+  })
+
+  it('requests a password reset and sets a new Password from the landing query', async () => {
+    const requestPasswordReset = vi.fn(async (): Promise<AuthResult> => ({ ok: true }))
+    const resetPassword = vi.fn(async (): Promise<AuthResult> => ({ ok: true }))
+    const { props } = setup({ requestPasswordReset, resetPassword })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy() })
+    fireEvent.click(screen.getByRole('button', { name: '忘记密码？' }))
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'a@b.c' } })
+    fireEvent.submit(screen.getByRole('button', { name: '发送重置邮件' }).closest('form')!)
+    await waitFor(() => { expect(props.requestPasswordReset).toHaveBeenCalledWith('a@b.c') })
+    expect(screen.getByText('我们已经向该邮箱发送了密码重置链接。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '重发重置邮件' }))
+    await waitFor(() => { expect(props.requestPasswordReset).toHaveBeenCalledTimes(2) })
+
+    cleanup()
+    const replaceSearch = vi.fn()
+    setup({
+      getSearch: () => '?reset=abc123',
+      replaceSearch,
+      resetPassword,
+    })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '设置新密码' })).toBeTruthy() })
+    expect(replaceSearch).toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password99' } })
+    fireEvent.submit(screen.getByRole('button', { name: '设置新密码' }).closest('form')!)
+    await waitFor(() => { expect(resetPassword).toHaveBeenCalledWith('abc123', 'password99') })
+    expect(screen.getByText('密码已更新，请使用新密码登录。')).toBeTruthy()
+
+    cleanup()
+    const failingReset = vi.fn(async (): Promise<AuthResult> => ({
+      ok: false,
+      error: { code: 'invalid_or_expired', message: 'expired' },
+    }))
+    setup({
+      getSearch: () => '?reset=dead',
+      resetPassword: failingReset,
+    })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '设置新密码' })).toBeTruthy() })
+    fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'password99' } })
+    fireEvent.submit(screen.getByRole('button', { name: '设置新密码' }).closest('form')!)
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('expired') })
+  })
+
+  it('shows an invalid-reset notice for an empty landing token', async () => {
+    const replaceSearch = vi.fn()
+    setup({
+      getSearch: () => '?reset=',
+      replaceSearch,
+    })
+    await waitFor(() => { expect(screen.getByText('重置链接无效或已过期，请重新发送。')).toBeTruthy() })
+    expect(replaceSearch).toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy()
+  })
+
+  it('keeps the reset form when /auth/me fails and a token is present', async () => {
+    setup({
+      getSearch: () => '?reset=tok',
+      me: vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    })
+    await waitFor(() => { expect(screen.getByRole('heading', { name: '设置新密码' })).toBeTruthy() })
   })
 })

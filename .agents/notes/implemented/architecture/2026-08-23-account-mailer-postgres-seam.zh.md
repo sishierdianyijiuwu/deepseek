@@ -36,22 +36,25 @@ Status: implemented
 | POST | `/auth/sign-in` |
 | POST | `/auth/sign-out` |
 | POST | `/auth/resend-verification` |
+| POST | `/auth/request-password-reset` |
+| POST | `/auth/reset-password` |
 | GET | `/auth/me` |
 | GET | `/verify`（`HEAD` 返回 200 且不消费令牌） |
+| GET | `/reset`（`HEAD` 返回 200 且不消费令牌） |
 
 `GET /verify?token=` 存在，是因为 `frontend-static` 对未知路径返回 404；处理器完成验证后重定向到 `/?verified=ok` 或 `/?verified=invalid`，让 `/` 上的 SPA 展示结果。业务结果的 JSON 为 HTTP 200 的 `{ ok: true }` 或 `{ ok: false, error: { code, message } }`。
 
 ### Sign-in session cookie
 
-浏览器通过 HTTP-only cookie `dsh_sign_in`（`Path=/; SameSite=Lax`；`cookieSecure` 开启时带 `Secure`）出示服务端 Sign-in session id。产品文案仍称 Sign-in session。原始 id 是不可猜测的十六进制；PostgreSQL 存储该 id 的 SHA-256。工单 #2 负责创建和结束 Sign-in session；14 天滑动有效期属于工单 #3。
+浏览器通过 HTTP-only cookie `dsh_sign_in`（`Path=/; SameSite=Lax`；带 `Max-Age`，因此关闭浏览器不会结束它；`cookieSecure` 开启时带 `Secure`）出示服务端 Sign-in session id。产品文案仍称 Sign-in session。原始 id 是不可猜测的十六进制；PostgreSQL 存储该 id 的 SHA-256。`lookupSignIn` 把有效的 Sign-in session 按 `signInTtlMs`（默认 14 天）向前滑动；`/auth/me` 刷新 cookie 的 `Max-Age`。密码重置结束该 Account 的每一个 Sign-in session（[滑动与重置](../feature/2026-08-23-password-reset-sliding-sign-in.zh.md)）。
 
 ### Password 与令牌
 
-Password 是 scrypt 单向哈希（`scrypt$N$r$p$salt$key`），绝不是 Credential。验证令牌是 32 字节密钥，存储为 SHA-256，一次性使用，`verificationTtlMs` 可配置（默认 24 小时）。重复邮箱由规范化地址上的唯一索引拒绝；并发插入只产生一个 Account。错误 Password 或未知邮箱的失败登录返回相同的 `invalid_credentials`。持有正确 Password 的 Unverified Account 返回 `unverified`，并且不设置 cookie。
+Password 是 scrypt 单向哈希（`scrypt$N$r$p$salt$key`），绝不是 Credential。验证令牌和密码重置令牌是 32 字节密钥，存储为 SHA-256，一次性使用，`verificationTtlMs`（默认 24 小时）与 `passwordResetTtlMs`（默认 1 小时）可配置。重复邮箱由规范化地址上的唯一索引拒绝；并发插入只产生一个 Account。错误 Password 或未知邮箱的失败登录返回相同的 `invalid_credentials`。持有正确 Password 的 Unverified Account 返回 `unverified`，并且不设置 cookie。
 
 ### PostgreSQL
 
-ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url` 为 `postgres://…` / `postgresql://…`，或 HTTP 测试使用的进程内 PostgreSQL 引擎 `pglite:`。schema 版本为 `SCHEMA_VERSION = 1`；不匹配则在加载时失败。Session JSONL 仍是文件。
+ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url` 为 `postgres://…` / `postgresql://…`，或 HTTP 测试使用的进程内 PostgreSQL 引擎 `pglite:`。schema 版本为 `SCHEMA_VERSION = 2`；不匹配则在加载时失败。Session JSONL 仍是文件。
 
 ### 邮件发送
 
@@ -63,7 +66,7 @@ ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url
 
 ### 测试
 
-真相来源是 Loader 组合的 HTTP：对 `127.0.0.1:port` 做真实 `fetch`、一个 cookie jar、假邮件发送。测试断言状态码、JSON、cookie 效果，以及假实现是否被调用 — 不断言 PostgreSQL 行或哈希算法。
+真相来源是 Loader 组合的 HTTP：对 `127.0.0.1:port` 做真实 `fetch`、cookie jar、假邮件发送，以及假的 `Date.now` 时钟。测试断言状态码、JSON、cookie 效果，以及假实现是否被调用 — 不断言 PostgreSQL 行或哈希算法。
 
 ## 曾考虑的替代方案
 
@@ -79,8 +82,8 @@ ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url
 
 **进程内 user-service 测试 seam。** 被父规范 Testing Decisions 否决。带假邮件发送的 HTTP 是唯一 seam。
 
-**用 JWT 作为 Sign-in session。** 否决：产品词汇禁止把 JWT 当作产品名称，而且规范要求服务端 session id，以便后续密码重置能结束该 Account 的每一个 Sign-in session。
+**用 JWT 作为 Sign-in session。** 否决：产品词汇禁止把 JWT 当作产品名称，而且规范要求服务端 session id，以便密码重置能结束该 Account 的每一个 Sign-in session。
 
 ## 后果
 
-七个新包和一个托管 profile 增加了 Loader 行、环境配置，以及托管表面上的 cookie。本地 `dsh web` 仍然没有 Account。`/api` Session 方法在工单 #4 之前仍未认证。密码重置、滑动有效期、Ban 和按 Account 划分的 Credential 仍属后续工单。使用 PGlite 和假邮件发送的 HTTP 测试钉住注册／验证／登录／退出，不需要真实 SMTP 或共享 Postgres。
+七个新包和一个托管 profile 增加了 Loader 行、环境配置，以及托管表面上的 cookie。本地 `dsh web` 仍然没有 Account。`/api` Session 方法在工单 #4 之前仍未认证。Ban 和按 Account 划分的 Credential 仍属后续工单。使用 PGlite、假邮件发送和假时钟的 HTTP 测试钉住注册／验证／登录／退出／重置／滑动，不需要真实 SMTP 或共享 Postgres。

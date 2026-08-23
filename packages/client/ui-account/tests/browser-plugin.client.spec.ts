@@ -48,6 +48,8 @@ describe('ui-account browser apply', () => {
     await expect(injected.signIn('a@b.c', 'pw')).resolves.toEqual({ ok: true })
     await expect(injected.signOut()).resolves.toEqual({ ok: true })
     await expect(injected.resend('a@b.c')).resolves.toEqual({ ok: true })
+    await expect(injected.requestPasswordReset('a@b.c')).resolves.toEqual({ ok: true })
+    await expect(injected.resetPassword('tok', 'pw')).resolves.toEqual({ ok: true })
     expect(injected.getSearch()).toBe('?verified=ok')
     injected.replaceSearch()
     expect(window.location.search).toBe('')

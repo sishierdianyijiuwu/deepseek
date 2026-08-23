@@ -12,19 +12,31 @@ export type AccountGateProps =
   & InjectFace<AccountGateInjected>
   & PropsLocale<'account'>
 
-type Screen = 'loading' | 'register' | 'sign-in' | 'check-email' | 'signed-in'
+type Screen =
+  | 'loading'
+  | 'register'
+  | 'sign-in'
+  | 'check-email'
+  | 'forgot'
+  | 'check-reset'
+  | 'reset'
+  | 'signed-in'
 
 /**
- * Register / sign-in / sign-out overlay. Occupies the whole viewport until a
- * Sign-in session exists, then a small signed-in chip.
+ * Register / sign-in / password-reset / sign-out overlay. Occupies the whole
+ * viewport until a Sign-in session exists, then a small signed-in chip.
  * @param props - overlay runtime share, auth callbacks, and locale seat.
  * @returns the gate UI.
  */
 export function AccountGate(props: AccountGateProps): ReactNode {
-  const { me, register, signIn, signOut, resend, getSearch, replaceSearch, t } = props
+  const {
+    me, register, signIn, signOut, resend, requestPasswordReset, resetPassword,
+    getSearch, replaceSearch, t,
+  } = props
   const [screen, setScreen] = useState<Screen>('loading')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [resetToken, setResetToken] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -34,24 +46,38 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     let cancelled = false
     const search = getSearch()
     const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
-    const verified = params.get('verified')
-    const applyVerifiedNotice = (): void => {
+    const applyLanding = (): boolean => {
+      if (params.has('reset')) {
+        const token = params.get('reset') || ''
+        replaceSearch()
+        if (token === '') {
+          setNotice(t('reset.invalid'))
+          setScreen('sign-in')
+        } else {
+          setResetToken(token)
+          setPassword('')
+          setScreen('reset')
+        }
+        return true
+      }
+      const verified = params.get('verified')
       if (verified === 'ok') setNotice(t('verified.ok'))
       else if (verified === 'invalid') setNotice(t('verified.invalid'))
       if (verified !== null) replaceSearch()
+      return false
     }
     void me().then((result) => {
       if (cancelled) return
+      if (applyLanding()) return
       if (result.signedIn) {
         setSignedInEmail(result.email)
         setScreen('signed-in')
         return
       }
-      applyVerifiedNotice()
       setScreen('sign-in')
     }, () => {
       if (cancelled) return
-      applyVerifiedNotice()
+      if (applyLanding()) return
       setError({ code: 'network', message: t('error.network') })
       setScreen('sign-in')
     })
@@ -105,6 +131,32 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     })
   }
 
+  const onForgot = (event: FormEvent): void => {
+    event.preventDefault()
+    run(() => requestPasswordReset(email), () => {
+      setNotice(null)
+      setScreen('check-reset')
+    })
+  }
+
+  const onResendReset = (event?: FormEvent): void => {
+    event?.preventDefault()
+    run(() => requestPasswordReset(email), () => {
+      setError(null)
+      setNotice(t('checkReset.body'))
+    })
+  }
+
+  const onReset = (event: FormEvent): void => {
+    event.preventDefault()
+    run(() => resetPassword(resetToken, password), () => {
+      setPassword('')
+      setResetToken('')
+      setNotice(t('reset.ok'))
+      setScreen('sign-in')
+    })
+  }
+
   const onSignOut = (): void => {
     run(() => signOut(), () => {
       setSignedInEmail('')
@@ -131,14 +183,29 @@ export function AccountGate(props: AccountGateProps): ReactNode {
     ? t('title.register')
     : screen === 'check-email'
       ? t('title.checkEmail')
-      : t('title.signIn')
+      : screen === 'forgot'
+        ? t('title.forgot')
+        : screen === 'check-reset'
+          ? t('title.checkReset')
+          : screen === 'reset'
+            ? t('title.reset')
+            : t('title.signIn')
   const onSubmit = screen === 'register'
     ? onRegister
     : screen === 'check-email'
       ? onResend
-      : onSignIn
+      : screen === 'forgot'
+        ? onForgot
+        : screen === 'check-reset'
+          ? onResendReset
+          : screen === 'reset'
+            ? onReset
+            : onSignIn
   const offerResend = error?.code === 'unverified' || error?.code === 'email_taken'
   const resendLabel = busy ? t('busy') : t('submit.resend')
+  const showEmail = screen !== 'reset'
+  const showPassword = screen === 'register' || screen === 'sign-in' || screen === 'reset'
+  const passwordAutoComplete = screen === 'sign-in' ? 'current-password' : 'new-password'
 
   return (
     <OnboardingSurface>
@@ -148,22 +215,27 @@ export function AccountGate(props: AccountGateProps): ReactNode {
         {screen === 'check-email' && error?.code !== 'mail_failed' && (
           <p className={css.notice}>{t('checkEmail.body')}</p>
         )}
-        <label className={css.label}>
-          {t('email')}
-          <Input
-            type="email"
-            autoComplete="username"
-            value={email}
-            onChange={(event) => { setEmail(event.target.value) }}
-            required
-          />
-        </label>
-        {screen !== 'check-email' && (
+        {screen === 'check-reset' && (
+          <p className={css.notice}>{t('checkReset.body')}</p>
+        )}
+        {showEmail && (
+          <label className={css.label}>
+            {t('email')}
+            <Input
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(event) => { setEmail(event.target.value) }}
+              required
+            />
+          </label>
+        )}
+        {showPassword && (
           <label className={css.label}>
             {t('password')}
             <Input
               type="password"
-              autoComplete={screen === 'register' ? 'new-password' : 'current-password'}
+              autoComplete={passwordAutoComplete}
               value={password}
               onChange={(event) => { setPassword(event.target.value) }}
               required
@@ -187,9 +259,34 @@ export function AccountGate(props: AccountGateProps): ReactNode {
               {resendLabel}
             </Button>
           )}
+          {screen === 'forgot' && (
+            <Button variant="primary" disabled={busy} type="submit">
+              {busy ? t('busy') : t('submit.forgot')}
+            </Button>
+          )}
+          {screen === 'check-reset' && (
+            <Button variant="primary" disabled={busy} type="submit">
+              {busy ? t('busy') : t('submit.resendReset')}
+            </Button>
+          )}
+          {screen === 'reset' && (
+            <Button variant="primary" disabled={busy} type="submit">
+              {busy ? t('busy') : t('submit.reset')}
+            </Button>
+          )}
           {offerResend && (
             <Button variant="primary" disabled={busy} type="button" onClick={() => { onResend() }}>
               {resendLabel}
+            </Button>
+          )}
+          {screen === 'sign-in' && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              type="button"
+              onClick={() => { setError(null); setNotice(null); setScreen('forgot') }}
+            >
+              {t('switch.forgot')}
             </Button>
           )}
           {screen !== 'sign-in' && (
