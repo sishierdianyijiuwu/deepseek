@@ -155,6 +155,10 @@ export class FakeApiClient implements IApiClient {
       workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
       created: true,
     }))),
+    import: (payload: unknown) => this.record('workspace.import', payload, Promise.resolve(ok({
+      workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
+      created: true,
+    }))),
     rename: (payload: unknown) => this.record('workspace.rename', payload, Promise.resolve(ok({
       workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
     }))),

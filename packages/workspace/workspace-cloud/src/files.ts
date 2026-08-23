@@ -3,7 +3,8 @@
  * @module @deepseek-ai/dsh-workspace-cloud/src/files
  */
 
-import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** v1 cap: 1 GiB of file bytes per Workspace (ADR 0009). */
@@ -97,20 +98,73 @@ export async function writeWorkspaceFile(
   data: Uint8Array,
 ): Promise<void> {
   const full = resolveWorkspaceFile(root, relativePath)
-  let previous = 0
-  try {
-    const existing = await lstat(full)
-    if (existing.isFile()) previous = existing.size
-  } catch (error: unknown) {
-    if ((error as { code?: string }).code !== 'ENOENT') throw error
-  }
+  await mkdir(dirname(full), { recursive: true })
+  const previous = await containedRegularFileSize(root, full, relativePath)
   const current = await treeBytes(root)
   const extra = data.byteLength - previous
   if (current + extra > MAX_WORKSPACE_BYTES) {
     throw new CloudWorkspaceQuotaError(current, extra)
   }
-  await mkdir(dirname(full), { recursive: true })
-  await writeFile(full, data)
+  await writeNoFollow(full, relativePath, data)
+}
+
+/**
+ * Walk from `root` to `full` and refuse any symlink component.
+ * @param root - canonical Workspace directory.
+ * @param full - resolved file path under root.
+ * @param relativePath - caller-supplied path (error payload).
+ * @returns existing regular-file size, or 0 when the leaf does not exist.
+ */
+async function containedRegularFileSize(
+  root: string,
+  full: string,
+  relativePath: string,
+): Promise<number> {
+  let current = root
+  const parts = relative(root, full).split(sep).filter(part => part !== '')
+  for (let index = 0; index < parts.length; index += 1) {
+    current = join(current, parts[index] as string)
+    let existing
+    try {
+      existing = await lstat(current)
+    } catch (error: unknown) {
+      if ((error as { code?: string }).code === 'ENOENT') {
+        if (index === parts.length - 1) return 0
+        throw new CloudWorkspacePathError(relativePath)
+      }
+      throw error
+    }
+    if (existing.isSymbolicLink()) {
+      if (index < parts.length - 1) throw new CloudWorkspacePathError(relativePath)
+      return 0
+    }
+    if (index === parts.length - 1) return existing.isFile() ? existing.size : 0
+  }
+  return 0
+}
+
+/**
+ * Replace `full` without following a final-path symlink.
+ * @param full - resolved file path under the Workspace.
+ * @param relativePath - caller-supplied path (error payload).
+ * @param data - bytes to write.
+ */
+async function writeNoFollow(full: string, relativePath: string, data: Uint8Array): Promise<void> {
+  let handle
+  try {
+    handle = await open(full, constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0))
+  } catch (error: unknown) {
+    const code = (error as { code?: string }).code
+    if (code === 'ELOOP' || code === 'EPERM') throw new CloudWorkspacePathError(relativePath)
+    if (code !== 'ENOENT') throw error
+    handle = await open(full, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL)
+  }
+  try {
+    await handle.truncate(data.byteLength)
+    await handle.write(data, 0, data.byteLength, 0)
+  } finally {
+    await handle.close()
+  }
 }
 
 /**

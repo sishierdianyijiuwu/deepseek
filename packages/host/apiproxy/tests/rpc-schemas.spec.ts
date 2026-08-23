@@ -22,6 +22,7 @@ import {
 import {
   workspaceArchiveSessionRequestSchema, workspaceArchiveSessionValueSchema,
   workspaceCreateRequestSchema, workspaceCreateValueSchema, workspaceIdSchema,
+  workspaceImportRequestSchema, workspaceImportValueSchema,
   workspaceDeleteRequestSchema, workspaceDeleteValueSchema,
   workspaceInsertBeforeRequestSchema, workspaceInsertBeforeValueSchema,
   workspaceInsertSessionBeforeRequestSchema, workspaceInsertSessionBeforeValueSchema,
@@ -71,6 +72,9 @@ describe('rpcErrorSchema', () => {
     expect(rpcErrorSchema.parse({ code: 'workspace-required', message: 'm', details: {} }).code).toBe('workspace-required')
     expect(rpcErrorSchema.parse({ code: 'workspace-limit', message: 'm', details: { max: 3 } }).code).toBe('workspace-limit')
     expect(rpcErrorSchema.parse({ code: 'workspace-quota-exceeded', message: 'm', details: { maxBytes: 1 } }).code).toBe('workspace-quota-exceeded')
+    expect(rpcErrorSchema.parse({
+      code: 'workspace-import-refused', message: 'm', details: { gitUrl: 'https://example.com/a.git' },
+    }).code).toBe('workspace-import-refused')
     expect(rpcErrorSchema.parse({
       code: 'model-unavailable',
       message: 'm',
@@ -391,6 +395,16 @@ describe('workspace domain schemas', () => {
     expect(workspaceCreateRequestSchema.parse({}).path).toBeUndefined()
     expect(workspaceCreateRequestSchema.parse({ title: 'N' }).title).toBe('N')
     expect(workspaceCreateValueSchema.parse({ workspace: view, created: false }).created).toBe(false)
+  })
+
+  it('import requires a gitUrl', () => {
+    expect(workspaceImportRequestSchema.parse({ gitUrl: 'https://example.com/a.git' }).gitUrl)
+      .toBe('https://example.com/a.git')
+    expect(workspaceImportRequestSchema.parse({ gitUrl: 'https://example.com/a.git', title: 'A' }).title)
+      .toBe('A')
+    expect(() => workspaceImportRequestSchema.parse({ gitUrl: '' })).toThrow()
+    expect(() => workspaceImportRequestSchema.parse({})).toThrow()
+    expect(workspaceImportValueSchema.parse({ workspace: view, created: true }).created).toBe(true)
   })
 
   it('write requires a workspace id, relative path, and data', () => {

@@ -2794,6 +2794,11 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       write: request => ok(request, { written: true as const }),
       listFiles: request => ok(request, { paths: [] }),
       read: request => ok(request, { data: '' }),
+      import: request => err(request, {
+        code: 'workspace-import-refused',
+        message: 'git Import requires cloud Workspaces',
+        details: { gitUrl: request.payload.gitUrl },
+      }),
     },
     agentPresets: {
       // Both trusts appear, because a surface must present a locally authored
@@ -3204,6 +3209,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'host.openPath': return this.api.host.openPath(request, new AbortController().signal)
       case 'workspace.list': return this.api.workspace.list(request)
       case 'workspace.create': return this.api.workspace.create(request)
+      case 'workspace.import': return this.api.workspace.import(request, signal)
       case 'workspace.rename': return this.api.workspace.rename(request)
       case 'workspace.delete': return this.api.workspace.delete(request)
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)

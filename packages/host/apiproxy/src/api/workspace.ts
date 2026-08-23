@@ -63,6 +63,18 @@ export interface WorkspaceApi {
   Promise<RpcResponse<{ workspace: WorkspaceView; created: boolean }>>
 
   /**
+   * Cloud: clones a public HTTPS git URL into a new Account-owned Workspace.
+   * Credential-bearing, non-HTTPS, and private remotes fail with
+   * `workspace-import-refused`. A fourth Workspace fails with `workspace-limit`;
+   * a tree past 1 GiB fails with `workspace-quota-exceeded`. Local Hosts
+   * without cloud Workspaces also fail with `workspace-import-refused`.
+   */
+  import(
+    request: RpcRequest<{ gitUrl: string; title?: string }>,
+    signal: AbortSignal,
+  ): Promise<RpcResponse<{ workspace: WorkspaceView; created: boolean }>>
+
+  /**
    * Renames a workspace. `title` is trimmed and must be non-empty
    * (schema-enforced). An unknown id fails with `workspace-not-found`; a
    * title equal to another workspace's fails with `workspace-name-conflict`.

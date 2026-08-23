@@ -1,4 +1,4 @@
-import { mkdir, open, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, symlink, writeFile } from 'node:fs/promises'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -78,5 +78,31 @@ describe('treeBytes and writeWorkspaceFile', () => {
     expect(await treeBytes(dir)).toBe(MAX_WORKSPACE_BYTES)
     await expect(writeWorkspaceFile(dir, 'pad', Buffer.alloc(MAX_WORKSPACE_BYTES + 1)))
       .rejects.toMatchObject({ name: 'CloudWorkspaceQuotaError' })
+  })
+
+  it('refuses to write through a symlink to a file outside the Workspace', async () => {
+    const dir = await stage()
+    const victim = join(dir, '..', `outside-${Date.now()}.txt`)
+    await writeFile(victim, 'keep')
+    const outsideDir = await mkdtemp(join(dir, '..', 'outside-dir-'))
+    try {
+      await symlink(victim, join(dir, 'link'))
+      await expect(writeWorkspaceFile(dir, 'link', Buffer.from('pwn')))
+        .rejects.toBeInstanceOf(CloudWorkspacePathError)
+      expect(await readFile(victim, 'utf8')).toBe('keep')
+
+      await writeFile(join(outsideDir, 'x.txt'), 'keep')
+      await mkdir(join(dir, 'sub'))
+      await symlink(outsideDir, join(dir, 'sub', 'out'))
+      await expect(writeWorkspaceFile(dir, 'sub/out/x.txt', Buffer.from('pwn')))
+        .rejects.toBeInstanceOf(CloudWorkspacePathError)
+      expect(await readFile(join(outsideDir, 'x.txt'), 'utf8')).toBe('keep')
+
+      await mkdir(join(dir, 'folder'))
+      await expect(writeWorkspaceFile(dir, 'folder', Buffer.from('x'))).rejects.toThrow()
+    } finally {
+      await rm(victim, { force: true })
+      await rm(outsideDir, { recursive: true, force: true })
+    }
   })
 })

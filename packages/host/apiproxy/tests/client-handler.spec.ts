@@ -83,6 +83,7 @@ function scriptedApi(overrides: {
     workspace: {
       list: r => ok(r, { items: [], archivedSessionIds: [] }),
       create: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' }, created: true }),
+      import: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' }, created: true }),
       rename: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' } }),
       delete: r => ok(r, { deleted: true as const }),
       insertBefore: r => ok(r, { workspaceIds: [r.payload.workspaceId] }),
@@ -434,6 +435,8 @@ describe('workspace domain round trip', () => {
     const created = await c.workspace.create({ path: '/t' })
     expect(created.result.ok).toBe(true)
     if (created.result.ok) expect(created.result.value.created).toBe(true)
+    const imported = await c.workspace.import({ gitUrl: 'https://example.com/acme/notes.git' })
+    expect(imported.result.ok).toBe(true)
     const archivedResponse = await c.workspace.archiveSession({ sessionId: 's-arch' as never })
     expect(archivedResponse.result).toEqual({ ok: true, value: { archivedSessionIds: ['s-arch'] } })
   })

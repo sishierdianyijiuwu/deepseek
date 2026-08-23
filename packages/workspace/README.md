@@ -7,7 +7,7 @@ This family owns persistent workspaces: user directories with titles and ordered
 | Package | Role | ctx key |
 |---|---|---|
 | [`workspace/`](workspace/README.md) | Registers workspaces and accounts for their sessions | `ctx.workspaceRegistry` |
-| [`workspace-cloud/`](workspace-cloud/README.md) | Hosted empty Workspaces: PostgreSQL metadata, Account-namespaced files, caps | `ctx.cloudWorkspaces` |
+| [`workspace-cloud/`](workspace-cloud/README.md) | Hosted Workspaces: empty or public-git Import, PostgreSQL metadata, Account-namespaced files, caps | `ctx.cloudWorkspaces` |
 
 The [workspace package reference](workspace/README.md) owns lifecycle, persistence, and deletion semantics.
 

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-23-cloud-empty-workspaces-with-caps.md
-2026-08-23-cloud-empty-workspaces-with-caps.md: 3b5afe609dbda00238ee05ab9361fa8c0e88ea4b
-2026-08-23-cloud-empty-workspaces-with-caps.zh.md: 631dd4d9e7182a078d935c55a66b1dbcafbcbf4b
+2026-08-23-cloud-empty-workspaces-with-caps.md: 8cc30df95009120c8535b34273ded541dae42660
+2026-08-23-cloud-empty-workspaces-with-caps.zh.md: 25366adb755b8bdaa90b4f5bb586c596e78c2ca5

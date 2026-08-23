@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, open, readFile, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, open, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -9,13 +9,17 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry, { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import CloudWorkspaces, {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
   CloudWorkspaceLimitError,
   CloudWorkspaceNotFoundError,
+  CloudWorkspacePathError,
   CloudWorkspaceQuotaError,
   DEFAULT_WORKSPACE_TITLE,
   MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
 } from '../src/index.ts'
+import { createBareRepo, generateSelfSignedTls, listenGitHttps } from './git-http-fixture.ts'
 
 let root: string | undefined
 let ctx: Context | undefined
@@ -27,7 +31,7 @@ afterEach(async () => {
   root = undefined
 })
 
-async function boot(options?: { rootDir?: string; url?: string }): Promise<{
+async function boot(options?: { rootDir?: string; url?: string; importTimeoutMs?: number }): Promise<{
   cloud: CloudWorkspaces
   files: string
   rootDir: string
@@ -45,7 +49,10 @@ async function boot(options?: { rootDir?: string; url?: string }): Promise<{
   ctx.provide('storageDomain', storageDomain)
   ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
   await ctx.plugin(WorkspaceRegistry)
-  await ctx.plugin(CloudWorkspaces, { url, root: files }).await()
+  await ctx.plugin(CloudWorkspaces, {
+    url, root: files, importTlsInsecure: true,
+    ...options?.importTimeoutMs === undefined ? {} : { importTimeoutMs: options.importTimeoutMs },
+  }).await()
   return { cloud: ctx.cloudWorkspaces, files, rootDir, url }
 }
 
@@ -181,5 +188,184 @@ describe('CloudWorkspaces', () => {
     const second = await boot({ rootDir, url })
     expect(second.cloud.listOwned(owner).map(item => item.title).sort()).toEqual(['One', 'Renamed', 'Two'])
     await expect(second.cloud.createEmpty(owner)).rejects.toBeInstanceOf(CloudWorkspaceLimitError)
+  })
+
+  it('imports a local public HTTPS git fixture into an owned slot and refuses private remotes', {
+    timeout: 60_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const publicRoot = join(rootDir, 'git-public')
+    await mkdir(publicRoot)
+    await createBareRepo(publicRoot, 'notes', { 'README.md': 'hello import\n' })
+    const pub = await listenGitHttps({ root: publicRoot, key: tls.key, cert: tls.cert })
+    const privateRoot = join(rootDir, 'git-private')
+    await mkdir(privateRoot)
+    await createBareRepo(privateRoot, 'secret', { 'secret.txt': 'nope\n' })
+    const priv = await listenGitHttps({
+      root: privateRoot, key: tls.key, cert: tls.cert,
+      basicAuth: { user: 'owner', pass: 'secret' },
+    })
+    try {
+      const owner = accountId('importer')
+      const other = accountId('stranger')
+      const imported = await cloud.importPublicGit(owner, pub.url('notes'), '  ')
+      expect(imported.title).toBe('notes')
+      expect(imported.path).toContain(owner)
+      expect(await readFile(join(imported.path, 'README.md'), 'utf8')).toBe('hello import\n')
+      expect(cloud.owns(owner, imported.id)).toBe(true)
+      expect(cloud.owns(other, imported.id)).toBe(false)
+      expect(cloud.listOwned(other)).toEqual([])
+
+      await expect(cloud.importPublicGit(owner, 'https://user:token@example.com/acme/notes.git'))
+        .rejects.toMatchObject({ name: 'CloudWorkspaceImportUrlError' })
+      try {
+        await cloud.importPublicGit(owner, 'https://user:token@example.com/acme/notes.git')
+      } catch (error: unknown) {
+        expect(String(error)).not.toContain('token')
+        expect((error as CloudWorkspaceImportUrlError).gitUrl).not.toContain('token')
+      }
+      await expect(cloud.importPublicGit(owner, 'http://127.0.0.1/notes.git'))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportUrlError)
+      await expect(cloud.importPublicGit(owner, 'git@example.com:acme/notes.git'))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportUrlError)
+      await expect(cloud.importPublicGit(owner, priv.url('secret')))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportError)
+      expect(cloud.listOwned(owner)).toHaveLength(1)
+    } finally {
+      await pub.close()
+      await priv.close()
+    }
+  })
+
+  it('refuses Import that would take a fourth slot or exceed 1 GiB', {
+    timeout: 120_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls-cap')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const gitRoot = join(rootDir, 'git-cap')
+    await mkdir(gitRoot)
+    await createBareRepo(gitRoot, 'tiny', { 'ok.txt': 'ok\n' })
+    await createBareRepo(gitRoot, 'huge', { pad: { truncate: MAX_WORKSPACE_BYTES } })
+    const server = await listenGitHttps({ root: gitRoot, key: tls.key, cert: tls.cert })
+    try {
+      const owner = accountId('capped')
+      await cloud.createEmpty(owner, 'One')
+      await cloud.createEmpty(owner, 'Two')
+      await cloud.importPublicGit(owner, server.url('tiny'), 'Three')
+      expect(cloud.listOwned(owner)).toHaveLength(MAX_WORKSPACES_PER_ACCOUNT)
+      await expect(cloud.importPublicGit(owner, server.url('tiny')))
+        .rejects.toBeInstanceOf(CloudWorkspaceLimitError)
+      expect(cloud.listOwned(owner)).toHaveLength(3)
+
+      const other = accountId('quota-import')
+      await expect(cloud.importPublicGit(other, server.url('huge')))
+        .rejects.toBeInstanceOf(CloudWorkspaceQuotaError)
+      expect(cloud.listOwned(other)).toEqual([])
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('aborts a hung clone without listing a Workspace or keeping a slot', {
+    timeout: 30_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot({ importTimeoutMs: 400 })
+    const tlsDir = join(rootDir, 'tls-hang')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const gitRoot = join(rootDir, 'git-hang')
+    await mkdir(gitRoot)
+    await createBareRepo(gitRoot, 'notes', { 'README.md': 'slow\n' })
+    const hang = await listenGitHttps({ root: gitRoot, key: tls.key, cert: tls.cert, hang: true })
+    try {
+      const owner = accountId('hung')
+      const abort = new AbortController()
+      const pending = cloud.importPublicGit(owner, hang.url('notes'), undefined, abort.signal)
+      await new Promise((resolve) => { setTimeout(resolve, 150) })
+      expect(cloud.listOwned(owner)).toEqual([])
+      abort.abort()
+      await expect(pending).rejects.toMatchObject({ name: 'CloudWorkspaceImportError', reason: 'cancelled' })
+      expect(cloud.listOwned(owner)).toEqual([])
+      await expect(cloud.importPublicGit(owner, hang.url('notes')))
+        .rejects.toMatchObject({ name: 'CloudWorkspaceImportError', reason: 'timed-out' })
+      expect(cloud.listOwned(owner)).toEqual([])
+      await cloud.createEmpty(owner, 'One')
+      await cloud.createEmpty(owner, 'Two')
+      await cloud.createEmpty(owner, 'Three')
+      await expect(cloud.createEmpty(owner)).rejects.toBeInstanceOf(CloudWorkspaceLimitError)
+    } finally {
+      await hang.close()
+    }
+  })
+
+  it('ignores parent GIT_CONFIG_GLOBAL credential.helper and insteadOf for a private remote', {
+    timeout: 30_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls-cred')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const privateRoot = join(rootDir, 'git-cred')
+    await mkdir(privateRoot)
+    await createBareRepo(privateRoot, 'secret', { 'secret.txt': 'nope\n' })
+    const priv = await listenGitHttps({
+      root: privateRoot, key: tls.key, cert: tls.cert,
+      basicAuth: { user: 'owner', pass: 'secret' },
+    })
+    const remote = priv.url('secret')
+    const ambient = join(rootDir, 'ambient.gitconfig')
+    await writeFile(ambient, `[credential]
+	helper = store
+[url "${remote.replace('https://', 'https://owner:secret@')}"]
+	insteadOf = ${remote}
+`)
+    const previous = process.env['GIT_CONFIG_GLOBAL']
+    process.env['GIT_CONFIG_GLOBAL'] = ambient
+    process.env['GIT_TERMINAL_PROMPT'] = '1'
+    try {
+      await expect(cloud.importPublicGit(accountId('cred'), remote))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportError)
+      expect(cloud.listOwned(accountId('cred'))).toEqual([])
+    } finally {
+      if (previous === undefined) delete process.env['GIT_CONFIG_GLOBAL']
+      else process.env['GIT_CONFIG_GLOBAL'] = previous
+      await priv.close()
+    }
+  })
+
+  it('does not follow a cloned or planted symlink into another Account tree', {
+    timeout: 30_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls-link')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const gitRoot = join(rootDir, 'git-link')
+    await mkdir(gitRoot)
+    await createBareRepo(gitRoot, 'notes', {
+      'README.md': 'ok\n',
+      escape: { symlink: '../../victim/secret.txt' },
+    })
+    const pub = await listenGitHttps({ root: gitRoot, key: tls.key, cert: tls.cert })
+    try {
+      const owner = accountId('linker')
+      const victim = accountId('victim')
+      const other = await cloud.createEmpty(victim, 'Victim')
+      await cloud.writeFile(victim, other.id, 'secret.txt', Buffer.from('keep'))
+      const imported = await cloud.importPublicGit(owner, pub.url('notes'))
+      expect((await lstat(join(imported.path, 'escape'))).isSymbolicLink()).toBe(false)
+      const planted = join(imported.path, 'planted')
+      await symlink(join(other.path, 'secret.txt'), planted)
+      await expect(cloud.writeFile(owner, imported.id, 'planted', Buffer.from('pwn')))
+        .rejects.toBeInstanceOf(CloudWorkspacePathError)
+      expect(await readFile(join(other.path, 'secret.txt'), 'utf8')).toBe('keep')
+    } finally {
+      await pub.close()
+    }
   })
 })
