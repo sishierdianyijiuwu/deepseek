@@ -18,6 +18,7 @@ import type {
 export { hashPassword, verifyPassword } from './password.ts'
 export { equalSecretHash, hashSecret, mintSecret } from './secret.ts'
 export { normalizeEmail } from './email.ts'
+export { SIGN_IN_COOKIE, cookieValue, currentAccountId, runWithAccount } from './request.ts'
 export type {
   AccountId,
   RegisterResult,

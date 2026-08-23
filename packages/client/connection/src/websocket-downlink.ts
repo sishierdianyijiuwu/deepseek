@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import WebSocket, { WebSocketServer } from 'ws'
+import { currentAccountId, runWithAccount } from '@deepseek-ai/dsh-account'
 import type {
   ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -62,10 +63,11 @@ export class WebSocketDownlinks {
    * @param head - Bytes already read after the upgrade headers.
    */
   handleMux(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    this.upgrade(req, socket, head, signal => this.api.events.mux({
+    const viewer = currentAccountId()
+    this.upgrade(req, socket, head, signal => runWithAccount(viewer, () => this.api.events.mux({
       rpcId: RpcId(randomUUID()),
       payload: {},
-    }, signal))
+    }, signal)))
   }
 
   /**
@@ -75,10 +77,11 @@ export class WebSocketDownlinks {
    * @param head - Bytes already read after the upgrade headers.
    */
   handleHost(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    this.upgrade(req, socket, head, signal => this.api.events.host({
+    const viewer = currentAccountId()
+    this.upgrade(req, socket, head, signal => runWithAccount(viewer, () => this.api.events.host({
       rpcId: RpcId(randomUUID()),
       payload: {},
-    }, signal))
+    }, signal)))
   }
 
   /**
@@ -102,16 +105,19 @@ export class WebSocketDownlinks {
     head: Buffer,
     open: (signal: AbortSignal) => AsyncIterable<RpcRequest<F>>,
   ): void {
+    const viewer = currentAccountId()
     this.server.handleUpgrade(req, socket, head, (websocket) => {
-      const abort = new AbortController()
-      websocket.once('close', () => { abort.abort() })
-      websocket.once('error', () => { abort.abort() })
-      websocket.once('message', () => {
-        websocket.close(1008, 'downlink only')
+      runWithAccount(viewer, () => {
+        const abort = new AbortController()
+        websocket.once('close', () => { abort.abort() })
+        websocket.once('error', () => { abort.abort() })
+        websocket.once('message', () => {
+          websocket.close(1008, 'downlink only')
+        })
+        const pump = this.pump(websocket, open(abort.signal), abort)
+        this.pumps.add(pump)
+        void pump.then(() => { this.pumps.delete(pump) })
       })
-      const pump = this.pump(websocket, open(abort.signal), abort)
-      this.pumps.add(pump)
-      void pump.then(() => { this.pumps.delete(pump) })
     })
   }
 
@@ -142,12 +148,24 @@ export class WebSocketDownlinks {
  * @param socket - Raw HTTP socket that remains owned by the caller.
  */
 export function rejectWebSocketUpgrade(socket: Duplex): void {
+  rejectUpgrade(socket, 403, 'Forbidden', 'forbidden')
+}
+
+/**
+ * Reject a WebSocket upgrade that presented no live Sign-in session.
+ * @param socket - Raw HTTP socket that remains owned by the caller.
+ */
+export function rejectUnauthorizedUpgrade(socket: Duplex): void {
+  rejectUpgrade(socket, 401, 'Unauthorized', 'unauthorized')
+}
+
+function rejectUpgrade(socket: Duplex, status: number, reason: string, body: string): void {
   socket.end([
-    'HTTP/1.1 403 Forbidden',
+    `HTTP/1.1 ${String(status)} ${reason}`,
     'Connection: close',
     'Content-Type: text/plain; charset=utf-8',
-    'Content-Length: 9',
+    `Content-Length: ${String(Buffer.byteLength(body))}`,
     '',
-    'forbidden',
+    body,
   ].join('\r\n'))
 }

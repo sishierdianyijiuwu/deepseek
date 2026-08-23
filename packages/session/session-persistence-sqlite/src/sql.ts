@@ -37,6 +37,7 @@ const SQL_RESOURCES = [
   'select-user-version',
   'set-application-id',
   'set-user-version-17',
+  'set-user-version-18',
   'synchronous-full',
   'trusted-schema-off',
   'update-session-revision',

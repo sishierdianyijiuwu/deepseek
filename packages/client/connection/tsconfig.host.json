@@ -18,6 +18,9 @@
   ],
   "references": [
     {
+      "path": "../../account/account"
+    },
+    {
       "path": "../../attachment/attachment"
     },
     {

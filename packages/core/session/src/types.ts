@@ -21,6 +21,9 @@ export type { JsonValue } from './json.ts'
 /** Identifies one session in the store (and its persistence artifacts). */
 export type SessionId = Branded<'SessionId'>
 
+/** Account id stored on a hosted Session header. Not Anonymous identity. */
+export type SessionOwnerId = Branded<'AccountId'>
+
 /**
  * Brand a string as a {@link SessionId}.
  * @param id - the raw session id string.
@@ -96,6 +99,13 @@ export interface SessionHeader {
    * would replay history the model can no longer act on.
    */
   readonly agentPreset?: string
+  /**
+   * Owning Account id. Absent on local single-home Sessions. A hosted control
+   * plane hides a Session whose owner is missing or does not match the
+   * signed-in Account; missing owner is not visible to everyone. This is not
+   * Anonymous identity.
+   */
+  readonly owner?: SessionOwnerId
 }
 
 /**
@@ -118,6 +128,7 @@ export interface CreateSessionOptions {
     readonly origin?: 'subagent'
     readonly delegationDepth?: number
     readonly agentPreset?: string
+    readonly owner?: SessionOwnerId
   }
 }
 

@@ -6,12 +6,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { signInSessionId } from '@deepseek-ai/dsh-account'
+import { SIGN_IN_COOKIE, cookieValue, signInSessionId } from '@deepseek-ai/dsh-account'
 import type { Accounts } from '@deepseek-ai/dsh-account'
-import type {} from '@deepseek-ai/dsh-host-webserver'
 
-/** Cookie name holding the Sign-in session id. Not a product name. */
-export const SIGN_IN_COOKIE = 'dsh_sign_in'
+export { SIGN_IN_COOKIE, cookieValue }
+import type {} from '@deepseek-ai/dsh-host-webserver'
 
 /** Maximum JSON body accepted on auth POST routes. */
 export const MAX_AUTH_BODY_BYTES = 64 * 1024
@@ -247,29 +246,6 @@ export async function readJsonObject(
     return undefined
   }
   return parsed as Record<string, unknown>
-}
-
-/**
- * Read one cookie value.
- * @param header - Cookie header.
- * @param cookieName - cookie name.
- * @returns the value, or `undefined` when absent.
- */
-export function cookieValue(header: string | undefined, cookieName: string): string | undefined {
-  if (header === undefined || header === '') return undefined
-  for (const part of header.split(';')) {
-    const trimmed = part.trim()
-    const eq = trimmed.indexOf('=')
-    if (eq <= 0) continue
-    if (trimmed.slice(0, eq) === cookieName) {
-      try {
-        return decodeURIComponent(trimmed.slice(eq + 1))
-      } catch {
-        return undefined
-      }
-    }
-  }
-  return undefined
 }
 
 /**

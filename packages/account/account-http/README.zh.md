@@ -14,7 +14,7 @@
 | GET | `/verify` | `?token=` 具名宿主路由；重定向到 `/?verified=ok` 或 `/?verified=invalid` |
 | HEAD | `/verify` | 200；不消费令牌 |
 
-Sign-in session id 放在 HTTP-only 的 `dsh_sign_in` cookie（`Path=/; SameSite=Lax`）。配置 `cookieSecure` 会为 HTTPS 反向代理部署加上 `Secure`。业务结果是 HTTP 200 JSON `{ ok: true }` 或 `{ ok: false, error: { code, message } }`（Unverified Account 行已写入但 mailer 发送失败时为 `mail_failed`）；承载层失败使用 400/405/413/415/404。
+Sign-in session id 放在 HTTP-only 的 `dsh_sign_in` cookie（`Path=/; SameSite=Lax`）。配置 `cookieSecure` 会为 HTTPS 反向代理部署加上 `Secure`。当组合了 `ctx.accounts` 时，Host `/api` 承载层（`dsh-client-connection`）要求此 cookie，并绑定 Account 以做 Session 隔离；鉴权与静态路由在没有它时仍可调用。业务结果是 HTTP 200 JSON `{ ok: true }` 或 `{ ok: false, error: { code, message } }`（Unverified Account 行已写入但 mailer 发送失败时为 `mail_failed`）；承载层失败使用 400/405/413/415/404。
 
 ## Model Experience
 
@@ -26,5 +26,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **不门控 `/api` Session 方法** — 未认证的 Host RPC 仍属后续 Account 拥有 Session 的工单。
 - **Cookie 名是协议常量** — 不是产品名称；产品文案仍称 Sign-in session。

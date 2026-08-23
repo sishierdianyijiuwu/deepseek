@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
+import { currentAccountId, type AccountId } from '@deepseek-ai/dsh-account'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -1070,8 +1071,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   let workspaceCreationChain = Promise.resolve()
   const pendingQuestions = new Map<RpcId, PendingQuestion>()
   const pendingApprovals = new Map<RpcId, PendingApproval>()
-  const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
+  interface MuxSubscriber {
+    readonly queue: FrameQueue<RpcRequest<MuxFrame>>
+    readonly viewer: AccountId | undefined
+  }
+  const muxSubscribers = new Set<MuxSubscriber>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+
+  function isolationActive(): boolean {
+    return ctx.get('accounts') !== undefined
+  }
+
+  function headerVisibleTo(header: SessionHeader, viewer: AccountId | undefined): boolean {
+    if (!isolationActive()) return true
+    return viewer !== undefined && header.owner === viewer
+  }
+
+  function headerVisible(header: SessionHeader): boolean {
+    return headerVisibleTo(header, currentAccountId())
+  }
+
+  function visibleSessionIdTo(sessionId: SessionId, viewer: AccountId | undefined): boolean {
+    const live = ctx.sessions.get(sessionId)
+    if (live !== undefined) return headerVisibleTo(live.header, viewer)
+    if (!isolationActive()) return true
+    return false
+  }
+
+  function assertHeaderVisible(header: SessionHeader, sessionId: SessionId): void {
+    if (!headerVisible(header)) throw new SessionNotFound(`session "${sessionId}" not found`)
+  }
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1196,6 +1225,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     apiRemoteSubagentOwnershipError(sessionId)
   const inspectServable = (sessionId: SessionId): Promise<{ meta: SessionHeader; events: SessionEvent[] }> =>
     inspectApiRemoteSession(ctx, sessionId)
+
+  async function requireVisibleHeader(sessionId: SessionId): Promise<SessionHeader> {
+    const attached = ctx.sessions.get(sessionId)
+    if (attached !== undefined) {
+      assertHeaderVisible(attached.header, sessionId)
+      return attached.header
+    }
+    const inspected = await inspectServable(sessionId)
+    assertHeaderVisible(inspected.meta, sessionId)
+    return inspected.meta
+  }
+
   // Cold resume composes the preset the session recorded, for the same reason
   // `session.create` does: its history was produced under that composition.
   // Every generic entry point — prompt, models, commands — arrives here, so
@@ -1205,16 +1246,35 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   // composition, and the header is written once at creation. Reading the
   // header here would silently undo the switch on the next restart and
   // restore that history under the old tool set.
-  const agentFor = createApiRemoteAgentResolver(ctx, {
+  const resolveAgent = createApiRemoteAgentResolver(ctx, {
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
   })
+  const agentFor = async (sessionId: SessionId) => {
+    try {
+      await requireVisibleHeader(sessionId)
+    } catch (error: unknown) {
+      if (error instanceof SessionNotFound) {
+        return { error: { code: 'session-not-found' as const, message: error.message, details: { sessionId } } }
+      }
+      throw error
+    }
+    return resolveAgent(sessionId)
+  }
 
-  /** Send one transient frame to every connected mux consumer. */
+  /** Send one already-identified mux envelope to every subscriber that may see it. */
+  function pushMux(envelope: RpcRequest<MuxFrame>): void {
+    const sessionId = 'sessionId' in envelope.payload ? envelope.payload.sessionId : undefined
+    for (const subscriber of muxSubscribers) {
+      if (sessionId !== undefined && !visibleSessionIdTo(sessionId, subscriber.viewer)) continue
+      subscriber.queue.push(envelope)
+    }
+  }
+
+  /** Send one transient frame to every connected mux consumer that may see it. */
   function broadcast(payload: MuxFrame): void {
-    const envelope = frame(payload)
-    for (const queue of muxQueues) queue.push(envelope)
+    pushMux(frame(payload))
   }
 
   // Projection change feed → session/projection push frames. The carrier
@@ -1332,7 +1392,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           rpcId,
           payload: { type: 'question/requested', sessionId, questions: request.questions },
         }
-        for (const queue of muxQueues) queue.push(envelope)
+        pushMux(envelope)
       })
     },
   })
@@ -1424,7 +1484,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         pendingApprovals.set(pending.rpcId, pending)
         req.signal?.addEventListener('abort', onAbort, { once: true })
         const envelope = requestedFrame(pending)
-        for (const queue of muxQueues) queue.push(envelope)
+        pushMux(envelope)
       })
     })
   }
@@ -1437,6 +1497,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   /** Read one stable session prefix without acquiring an Agent owner. */
   async function readSessionState(sessionId: SessionId): Promise<SessionReadState> {
+    await requireVisibleHeader(sessionId)
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) {
       return {
@@ -1472,6 +1533,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
   async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+    await requireVisibleHeader(sessionId)
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
     const inspected = await inspectServable(sessionId)
@@ -1567,6 +1629,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       creation = (async () => {
         const attached = ctx.sessions.get(sessionId)
         const live = ctx.agents.get(sessionId)
+        if (attached !== undefined) assertHeaderVisible(attached.header, sessionId)
         if (attached !== undefined && hasSubagentOwner(attached, live)) {
           throw new SubagentSessionOwnership(sessionId)
         }
@@ -1577,6 +1640,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           ? undefined
           : (await persistence.list()).find(header => header.id === sessionId)
         if (persistence !== undefined && stored !== undefined) {
+          assertHeaderVisible(stored, sessionId)
           const inspected = await persistence.inspect(sessionId)
           // Ownership first: explicit-id adoption of a session-backed
           // subagent must answer `agent-busy` regardless of the requested
@@ -1608,12 +1672,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
+        const owner = isolationActive() ? currentAccountId() : undefined
+        if (isolationActive() && owner === undefined) {
+          throw new Error('session.create requires a Sign-in session')
+        }
         return (await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
             cwd,
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
+            ...owner === undefined ? {} : { owner },
           },
           setup: composition.setup,
         })).agent
@@ -1622,12 +1691,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // this operation crossed an asynchronous persistence/filesystem step.
         const live = ctx.agents.get(sessionId)
         if (live !== undefined) {
+          assertHeaderVisible(live.session.header, sessionId)
           if (hasSubagentOwner(live.session, live)) throw new SubagentSessionOwnership(sessionId)
           return live
         }
         const attached = ctx.sessions.get(sessionId)
-        if (attached !== undefined && hasSubagentOwner(attached, undefined)) {
-          throw new SubagentSessionOwnership(sessionId)
+        if (attached !== undefined) {
+          assertHeaderVisible(attached.header, sessionId)
+          if (hasSubagentOwner(attached, undefined)) {
+            throw new SubagentSessionOwnership(sessionId)
+          }
         }
         throw error
       }).finally(() => {
@@ -1636,6 +1709,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       sessionCreations.set(sessionId, creation)
     }
     const agent = await creation
+    assertHeaderVisible(agent.session.header, sessionId)
     if (hasSubagentOwner(agent.session, agent)) throw new SubagentSessionOwnership(sessionId)
     // Beside the cwd check for the same reason, and after the await so it
     // covers every path that yields a live agent — freshly created, adopted
@@ -1673,13 +1747,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         ...projections === undefined ? {} : { projections },
       }
     }
-    const items = ctx.sessions.list().map(summarizeAttached)
+    const items = ctx.sessions.list().filter(session => headerVisible(session.header)).map(summarizeAttached)
     signal?.throwIfAborted()
     const attached = new Set(items.map(item => item.sessionId))
     const persistence = ctx.get('sessionPersistence')
     if (persistence !== undefined) {
       const cold = (await persistence.list(signal))
-        .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined)
+        .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined && headerVisible(meta))
       signal?.throwIfAborted()
       for (let offset = 0; offset < cold.length; offset += COLD_SUMMARY_BATCH_SIZE) {
         signal?.throwIfAborted()
@@ -2121,6 +2195,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           if (error instanceof SubagentSessionOwnership) {
             return err(request, subagentOwnershipError(error.sessionId))
           }
+          if (error instanceof SessionNotFound) {
+            return err(request, { code: 'session-not-found', message: error.message, details: { sessionId } })
+          }
           return err(request, {
             code: 'internal',
             message: `failed to create session "${sessionId}": ${String(error)}`,
@@ -2330,6 +2407,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               ...forkComposition.agentPreset === undefined
                 ? {}
                 : { agentPreset: forkComposition.agentPreset },
+              ...source.header.owner === undefined ? {} : { owner: source.header.owner },
             },
             agentOptions: agentOptions(),
             setup: forkComposition.setup,
@@ -2536,6 +2614,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     subagents: {
       async list(request, signal) {
         try {
+          await requireVisibleHeader(request.payload.parentSessionId)
           const entries = await ctx.subagents.listChildren(request.payload.parentSessionId, signal)
           return ok(request, {
             entries: entries.map(entry => entry.kind === 'child'
@@ -2547,6 +2626,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             parentAvailable: ctx.agents.get(request.payload.parentSessionId) !== undefined,
           })
         } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: request.payload.parentSessionId },
+            })
+          }
           if (signal?.aborted || (error instanceof SubagentError && error.code === 'CANCELLED')) {
             return err(request, {
               code: 'cancelled',
@@ -2569,6 +2655,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const {
           parentSessionId, childSessionId, mode, beforeSeq, maxMessages,
         } = request.payload
+        try {
+          await requireVisibleHeader(parentSessionId)
+        } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
+          throw error
+        }
         const verified = await catalogChild(ctx, {
           parentSessionId, childSessionId, mode,
         }, signal)
@@ -2636,6 +2734,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async prompt(request, signal) {
         const { parentSessionId, childSessionId, content, clientTimeZone } = request.payload
+        try {
+          await requireVisibleHeader(parentSessionId)
+        } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
+          throw error
+        }
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
           : canonicalClientTimeZone(clientTimeZone)
@@ -2677,25 +2787,33 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // the core primitive alone authorizes the durable address against the
       // live Activation, which is what keeps a live child interruptible while
       // its parent Agent is offline. Absent targets are accepted no-ops there.
-      interrupt(request) {
+      async interrupt(request) {
         const { parentSessionId, childSessionId } = request.payload
         try {
+          await requireVisibleHeader(parentSessionId)
           ctx.subagents.interrupt(childSessionId, { kind: 'user', parentSessionId })
         } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
           if (error instanceof SubagentError && error.code === 'UNAUTHORIZED') {
-            return Promise.resolve(err(request, {
+            return err(request, {
               code: 'subagent-unauthorized',
               message: 'subagent does not belong to this parent',
               details: { childSessionId },
-            }))
+            })
           }
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'internal',
             message: 'subagent interrupt failed',
             details: {},
-          }))
+          })
         }
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
     },
 
@@ -3326,12 +3444,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
+        const viewer = currentAccountId()
         const queue = new FrameQueue<RpcRequest<MuxFrame>>()
-        muxQueues.add(queue)
-        for (const session of ctx.sessions.list()) {
+        const subscriber: MuxSubscriber = { queue, viewer }
+        muxSubscribers.add(subscriber)
+        const visibleSessions = () => ctx.sessions.list().filter(session => headerVisibleTo(session.header, viewer))
+        for (const session of visibleSessions()) {
           subscribeSession(queue, session)
         }
         for (const pending of pendingQuestions.values()) {
+          if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
           queue.push({
             rpcId: pending.rpcId,
             payload: {
@@ -3342,11 +3464,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         // Refresh recovery: still-pending approval questions replay with their
         // stable rpcId so a reconnecting client can still answer them.
-        for (const pending of pendingApprovals.values()) queue.push(requestedFrame(pending))
+        for (const pending of pendingApprovals.values()) {
+          if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
+          queue.push(requestedFrame(pending))
+        }
         // Queue snapshot baseline (pendingQuestions precedent): frames replayed
         // in arrival order per session; a reconnecting client rebuilds its
         // queue view from these alone.
-        for (const session of ctx.sessions.list()) {
+        for (const session of visibleSessions()) {
           const agent = ctx.agents.get(session.id)
           if (agent?.session === session && agent.inbox.hasPending) {
             queue.push(frame({ type: 'session/queue', sessionId: session.id, items: queueItems(agent) }))
@@ -3358,7 +3483,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // set sends nothing — absence is how the client reads "no tasks".
         const jobs = ctx.get('jobs')
         if (jobs !== undefined) {
-          for (const session of ctx.sessions.list()) {
+          for (const session of visibleSessions()) {
             const views = jobViews(jobs.list(ctx.agents.get(session.id)))
             if (views.length > 0) {
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
@@ -3371,6 +3496,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
         const disposers = [
           ctx.on('session/event', (session: Session, event: SessionEvent) => {
+            if (!headerVisibleTo(session.header, viewer)) return
             if (event.type === 'tool/call') {
               const data = event.data as ToolCallData
               try {
@@ -3391,6 +3517,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
           }),
           ctx.on('session/created', (session: Session) => {
+            if (!headerVisibleTo(session.header, viewer)) return
             subscribeSession(queue, session)
             // The subscribe frame clears the client's task mirror, and a
             // session born after the stream opened missed the baseline loop.
@@ -3406,6 +3533,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }),
           ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
             if (owner !== undefined) {
+              if (!headerVisibleTo(owner.session.header, viewer)) return
               // The exact owner instance the fence compares against, so the
               // push stays correct even while that Agent's scope is tearing
               // down and a lookup by id would already miss.
@@ -3414,7 +3542,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
             // An unowned task is visible to every caller, so every subscribed
             // session's set changed with it.
-            for (const session of ctx.sessions.list()) {
+            for (const session of visibleSessions()) {
               queue.push(frame({
                 type: 'session/jobs',
                 sessionId: session.id,
@@ -3424,12 +3552,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })],
         ]
         return queue.iterate(signal, () => {
-          muxQueues.delete(queue)
+          muxSubscribers.delete(subscriber)
           for (const dispose of disposers) dispose()
         })
       },
 
       host(_request, signal) {
+        const viewer = currentAccountId()
         const queue = new FrameQueue<RpcRequest<HostFrame>>()
         const committedWorkspaces = ctx.workspaceRegistry.list()
         const committedWorkspaceIds = new Set(
@@ -3442,6 +3571,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
         const disposers = [
           ctx.on('session/created', (session: Session) => {
+            if (!headerVisibleTo(session.header, viewer)) return
             queue.push(frame({
               type: 'host/session-added',
               sessionId: session.id,
@@ -3453,12 +3583,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
+            if (!headerVisibleTo(session.header, viewer)) return
             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
+            if (!headerVisibleTo(agent.session.header, viewer)) return
             queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
           }),
           ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
+            if (!headerVisibleTo(agent.session.header, viewer)) return
             queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
           }),
           ctx.on('domain/changed', (change) => {
@@ -3569,7 +3702,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // which may carry absolute host paths into the browser error bar.
           return new Response('session log export failed to prepare the stored artifact', { status: 500 })
         }
-        if (root === undefined) {
+        if (root === undefined || !headerVisible(root.meta)) {
           return new Response('session not found', { status: 404 })
         }
         return new Response(
@@ -3596,6 +3729,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // then questions — the two registries share one id space of UUIDs.
       const approval = pendingApprovals.get(message.rpcId)
       if (approval !== undefined) {
+        if (!visibleSessionIdTo(approval.sessionId, currentAccountId())) {
+          return Promise.resolve({ accepted: false, reason: 'not-pending' })
+        }
         if (!message.result.ok) return Promise.resolve({ accepted: false, reason: 'bad-response' })
         const parsed = approvalResponsePayloadSchema.safeParse(message.result.value)
         // The payload's audit correlation must match the entry the rpcId routed
@@ -3607,7 +3743,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return Promise.resolve({ accepted: true })
       }
       const pending = pendingQuestions.get(message.rpcId)
-      if (pending === undefined) return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      if (pending === undefined || !visibleSessionIdTo(pending.sessionId, currentAccountId())) {
+        return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      }
       if (!message.result.ok) {
         if (message.result.error.code !== 'cancelled') {
           return Promise.resolve({ accepted: false, reason: 'bad-response' })

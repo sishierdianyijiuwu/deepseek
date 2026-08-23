@@ -9,7 +9,7 @@ import SessionStore, {
   SessionId,
   snapshotSessionEvent,
 } from '@deepseek-ai/dsh-session'
-import type { CreateSessionOptions, SessionEventType, SessionHeader, SessionSurface, TodoItem } from '@deepseek-ai/dsh-session'
+import type { CreateSessionOptions, SessionEventType, SessionHeader, SessionOwnerId, SessionSurface, TodoItem } from '@deepseek-ai/dsh-session'
 
 describe('Session', () => {
   it('exposes one stable readonly surface view', () => {
@@ -1278,6 +1278,15 @@ describe('SessionStore', () => {
     })
   })
 
+  it('attaches Account owner from meta to the header', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create(SessionId('owned'), {
+      meta: { owner: 'account-1' as SessionOwnerId },
+    })
+    expect(session.header.owner).toBe('account-1')
+  })
+
   it('attaches subagent origin and delegationDepth from meta to the header', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -1311,6 +1320,8 @@ describe('SessionStore', () => {
       { meta: { delegationDepth: 0.5 }, error: /delegationDepth must be a non-negative safe integer/ },
       { meta: { delegationDepth: -1 }, error: /delegationDepth must be a non-negative safe integer/ },
       { meta: { agentPreset: 1 }, error: /agentPreset must be a string/ },
+      { meta: { owner: 1 }, error: /owner must be a non-empty string/ },
+      { meta: { owner: '' }, error: /owner must be a non-empty string/ },
     ]
 
     for (const [index, { meta, error }] of cases.entries()) {

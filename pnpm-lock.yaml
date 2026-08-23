@@ -813,6 +813,15 @@ importers:
       '@deepseek-ai/dsh-account-postgres':
         specifier: workspace:^
         version: link:../account-postgres
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+      '@deepseek-ai/dsh-client-connection':
+        specifier: workspace:^
+        version: link:../../client/connection
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: workspace:^
+        version: link:../../host/apiproxy
       '@deepseek-ai/dsh-host-webserver':
         specifier: workspace:^
         version: link:../../host/webserver
@@ -822,6 +831,18 @@ importers:
       '@deepseek-ai/dsh-mailer':
         specifier: workspace:^
         version: link:../mailer
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
+      '@deepseek-ai/dsh-user-questions':
+        specifier: workspace:^
+        version: link:../../interaction/user-questions
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
 
   packages/account/account-postgres:
     dependencies:
@@ -1644,6 +1665,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-account':
+        specifier: workspace:^
+        version: link:../../account/account
       '@deepseek-ai/dsh-attachment':
         specifier: workspace:^
         version: link:../../attachment/attachment
@@ -5135,6 +5159,9 @@ importers:
 
   packages/host/apiproxy:
     dependencies:
+      '@deepseek-ai/dsh-account':
+        specifier: workspace:^
+        version: link:../../account/account
       '@deepseek-ai/dsh-agent':
         specifier: workspace:^
         version: link:../../core/agent
