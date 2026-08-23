@@ -263,7 +263,10 @@ describe('host.openPath', () => {
 describe('workspace.import', () => {
   it('refuses Import when cloud Workspaces are not composed', async () => {
     const { api } = await harness()
-    const result = await api.workspace.import(request({ gitUrl: 'https://example.com/acme/notes.git' }))
+    const result = await api.workspace.import(
+      request({ gitUrl: 'https://example.com/acme/notes.git' }),
+      new AbortController().signal,
+    )
     expect(result.result.ok).toBe(false)
     if (result.result.ok) throw new Error('unreachable')
     expect(result.result.error.code).toBe('workspace-import-refused')

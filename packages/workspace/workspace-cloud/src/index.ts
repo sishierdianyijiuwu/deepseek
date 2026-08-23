@@ -24,6 +24,7 @@ import {
 import {
   clonePublicGit,
   DEFAULT_WORKSPACE_TITLE,
+  IMPORT_CLONE_TIMEOUT_MS,
   parsePublicHttpsGitUrl,
   titleFromGitUrl,
 } from './git.ts'
@@ -35,7 +36,9 @@ export {
   CloudWorkspaceImportError,
   CloudWorkspaceImportUrlError,
   DEFAULT_WORKSPACE_TITLE,
+  IMPORT_CLONE_TIMEOUT_MS,
   parsePublicHttpsGitUrl,
+  redactGitUrl,
   titleFromGitUrl,
 } from './git.ts'
 export type { CloudWorkspaceRecord } from './types.ts'
@@ -77,6 +80,16 @@ export interface Config {
   url: string
   /** Control-plane directory that holds per-Account Workspace trees. */
   root: string
+  /**
+   * Wall-clock bound for one Import clone. Defaults to
+   * {@link IMPORT_CLONE_TIMEOUT_MS}.
+   */
+  importTimeoutMs?: number
+  /**
+   * Skip TLS verify on Import clone. Default false; tests set true for a
+   * self-signed local git-http-backend. Production must leave this false.
+   */
+  importTlsInsecure?: boolean
 }
 
 /**
@@ -94,11 +107,15 @@ export class CloudWorkspaces extends Service {
   static Config: z<Config> = z.object({
     url: z.string().required(),
     root: z.string().required(),
+    importTimeoutMs: z.number().default(IMPORT_CLONE_TIMEOUT_MS),
+    importTlsInsecure: z.boolean().default(false),
   })
 
   private sql: SqlClient | undefined
   private readonly url: string
   private root: string
+  private readonly importTimeoutMs: number
+  private readonly importTlsInsecure: boolean
   private readonly owners = new Map<string, AccountId>()
   private readonly pendingPaths = new Map<string, AccountId>()
   private readonly writeTails = new Map<string, Promise<void>>()
@@ -114,6 +131,8 @@ export class CloudWorkspaces extends Service {
     }
     this.url = config.url
     this.root = config.root
+    this.importTimeoutMs = config.importTimeoutMs ?? IMPORT_CLONE_TIMEOUT_MS
+    this.importTlsInsecure = config.importTlsInsecure === true
   }
 
   /** Open PostgreSQL, apply schema, create the file root, and load ownership. */
@@ -156,20 +175,78 @@ export class CloudWorkspaces extends Service {
    */
   async createEmpty(accountId: AccountId, title?: string): Promise<Workspace> {
     const workspaceTitle = title !== undefined && title.trim() !== '' ? title.trim() : DEFAULT_WORKSPACE_TITLE
+    if (await this.nextSlot(accountId) === undefined) throw new CloudWorkspaceLimitError()
+    const directory = join(this.root, accountId, randomUUID())
+    await mkdir(directory, { recursive: true })
+    try {
+      return await this.commitOwned(accountId, directory, workspaceTitle)
+    } catch (error: unknown) {
+      await rm(directory, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  /**
+   * Import a public HTTPS git remote into a new owned Workspace slot.
+   * Clone runs in an unlisted directory under the Account prefix; the
+   * registry row is created only after clone and the 1 GiB check succeed.
+   * Private, credential-bearing, and non-HTTPS remotes throw
+   * {@link CloudWorkspaceImportUrlError} before `git` runs. A fourth
+   * Workspace throws {@link CloudWorkspaceLimitError}. A tree past 1 GiB
+   * throws {@link CloudWorkspaceQuotaError}. Clone failure throws
+   * {@link CloudWorkspaceImportError}. Failed ingest does not keep a slot.
+   * @param accountId - owning Account.
+   * @param gitUrl - public HTTPS git URL.
+   * @param title - display title; omitted or blank uses the repo basename.
+   * @param signal - optional abort from the unary RPC.
+   * @returns the registry Workspace after clone and the size check.
+   */
+  async importPublicGit(
+    accountId: AccountId,
+    gitUrl: string,
+    title?: string,
+    signal?: AbortSignal,
+  ): Promise<Workspace> {
+    const url = parsePublicHttpsGitUrl(gitUrl)
+    if (await this.nextSlot(accountId) === undefined) throw new CloudWorkspaceLimitError()
+    const workspaceTitle = title !== undefined && title.trim() !== ''
+      ? title.trim()
+      : titleFromGitUrl(url)
+    const directory = join(this.root, accountId, randomUUID())
+    await mkdir(directory, { recursive: true })
+    try {
+      await clonePublicGit(url, directory, {
+        timeoutMs: this.importTimeoutMs,
+        tlsInsecure: this.importTlsInsecure,
+        ...signal === undefined ? {} : { signal },
+      })
+      const bytes = await treeBytes(directory)
+      if (bytes > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, bytes)
+      return await this.commitOwned(accountId, directory, workspaceTitle)
+    } catch (error: unknown) {
+      await rm(directory, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  /**
+   * Register an existing Account-namespaced directory as a cloud Workspace.
+   * @param accountId - owning Account.
+   * @param directory - dest that already exists under the Account prefix.
+   * @param title - display title.
+   * @returns the registry Workspace after the PG row exists.
+   */
+  private async commitOwned(accountId: AccountId, directory: string, title: string): Promise<Workspace> {
+    const canonical = await realpath(directory)
     for (;;) {
       const slot = await this.nextSlot(accountId)
       if (slot === undefined) throw new CloudWorkspaceLimitError()
-      const dirName = randomUUID()
-      const directory = join(this.root, accountId, dirName)
-      await mkdir(directory, { recursive: true })
-      const canonical = await realpath(directory)
       this.pendingPaths.set(canonical, accountId)
       let entity: Workspace
       try {
-        entity = await this.ctx.workspaceRegistry.create(canonical, workspaceTitle)
+        entity = await this.ctx.workspaceRegistry.create(canonical, title)
       } catch (error) {
         this.pendingPaths.delete(canonical)
-        await rm(directory, { recursive: true, force: true })
         throw error
       }
       this.pendingPaths.delete(canonical)
@@ -184,47 +261,12 @@ export class CloudWorkspaces extends Service {
       } catch (error) {
         this.owners.delete(entity.id)
         await this.ctx.workspaceRegistry.delete(entity.id)
-        await rm(directory, { recursive: true, force: true })
         if (isUniqueViolation(error) && (await this.nextSlot(accountId)) !== undefined) continue
         if (isUniqueViolation(error)) throw new CloudWorkspaceLimitError()
         throw error
       }
       return entity
     }
-  }
-
-  /**
-   * Import a public HTTPS git remote into a new owned Workspace slot.
-   * Private, credential-bearing, and non-HTTPS remotes are refused before
-   * clone; a tree past 1 GiB frees the slot and throws
-   * {@link CloudWorkspaceQuotaError}. Clone failure frees the slot.
-   * @param accountId - owning Account.
-   * @param gitUrl - public HTTPS git URL.
-   * @param title - display title; omitted or blank uses the repo basename.
-   * @returns the registry Workspace after clone and the size check.
-   */
-  async importPublicGit(accountId: AccountId, gitUrl: string, title?: string): Promise<Workspace> {
-    const url = parsePublicHttpsGitUrl(gitUrl)
-    const workspaceTitle = title !== undefined && title.trim() !== ''
-      ? title.trim()
-      : titleFromGitUrl(url)
-    const workspace = await this.createEmpty(accountId, workspaceTitle)
-    try {
-      await clonePublicGit(url, workspace.path)
-      const bytes = await treeBytes(workspace.path)
-      if (bytes > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, bytes)
-    } catch (error: unknown) {
-      try {
-        await this.deleteOwned(accountId, workspace.id)
-      } catch (cleanup: unknown) {
-        throw new AggregateError(
-          [error, cleanup],
-          `Import of '${url.href}' failed and the Workspace slot could not be freed`,
-        )
-      }
-      throw error
-    }
-    return workspace
   }
 
   /**

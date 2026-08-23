@@ -5,7 +5,7 @@
 import { execFile, spawn } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer } from 'node:https'
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -46,13 +46,13 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
  * Initialize a bare repo `{dir}/{name}.git` with a committed working tree.
  * @param dir - parent directory for work/ and the bare repo.
  * @param name - repo basename without `.git`.
- * @param files - relative path → utf8 contents, or `{ truncate: bytes }` for a sparse file.
+ * @param files - relative path → utf8 contents, `{ truncate: bytes }` for a sparse file, or `{ symlink: target }`.
  * @returns absolute path of the bare repo.
  */
 export async function createBareRepo(
   dir: string,
   name: string,
-  files: Record<string, string | { truncate: number }>,
+  files: Record<string, string | { truncate: number } | { symlink: string }>,
 ): Promise<string> {
   const work = join(dir, `${name}-work`)
   const bare = join(dir, `${name}.git`)
@@ -66,10 +66,12 @@ export async function createBareRepo(
     await mkdir(dirname(full), { recursive: true })
     if (typeof body === 'string') {
       await writeFile(full, body)
-    } else {
+    } else if ('truncate' in body) {
       const handle = await open(full, 'w')
       await handle.truncate(body.truncate)
       await handle.close()
+    } else {
+      await symlink(body.symlink, full)
     }
   }
   await git(work, ['add', '.'])
@@ -90,8 +92,15 @@ export async function listenGitHttps(options: {
   key: string
   cert: string
   basicAuth?: { user: string; pass: string }
+  /** Leave git HTTP requests open so clone hangs until abort/timeout. */
+  hang?: boolean
 }): Promise<GitHttpsFixture> {
+  const hanging: ServerResponse[] = []
   const server = createServer({ key: options.key, cert: options.cert }, (req, res) => {
+    if (options.hang === true) {
+      hanging.push(res)
+      return
+    }
     handleGitHttp(req, res, options)
   })
   await new Promise<void>((resolve, reject) => {
@@ -106,6 +115,7 @@ export async function listenGitHttps(options: {
   return {
     url: name => `${base}/${name}.git`,
     close: () => new Promise((resolve, reject) => {
+      for (const res of hanging) res.destroy()
       server.close(error => error !== undefined ? reject(error) : resolve())
     }),
   }

@@ -3,7 +3,7 @@
  * Caps and cross-Account denial are observed as HTTP status and RPC bodies.
  */
 
-import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -138,6 +138,7 @@ async function boot(): Promise<Harness> {
     '  config:',
     "    url: 'pglite:'",
     `    root: ${JSON.stringify(files)}`,
+    '    importTlsInsecure: true',
     "- name: '@deepseek-ai/dsh-client-connection'",
     '',
   ].join('\n'))
@@ -338,7 +339,6 @@ describe('Cloud Workspaces over HTTP', () => {
       workspaceId, path: 'note.txt', data: 'ok',
     })
     expect((note.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
-    const { readFile } = await import('node:fs/promises')
     expect(await readFile(join(workspacePath!, 'note.txt'), 'utf8')).toBe('ok')
 
     const pad = await open(join(workspacePath!, 'pad'), 'w')
@@ -400,9 +400,11 @@ describe('Cloud Workspaces over HTTP', () => {
       expect(rpcError((await rpc(harness, jarB, 'session.create', { workspaceId })).body))
         .toBe('workspace-not-found')
 
-      expect(rpcError((await rpc(harness, jarA, 'workspace.import', {
+      const credential = await rpc(harness, jarA, 'workspace.import', {
         gitUrl: 'https://user:token@example.com/acme/notes.git',
-      })).body)).toBe('workspace-import-refused')
+      })
+      expect(rpcError(credential.body)).toBe('workspace-import-refused')
+      expect(JSON.stringify(credential.body)).not.toContain('token')
       expect(rpcError((await rpc(harness, jarA, 'workspace.import', {
         gitUrl: 'git@example.com:acme/notes.git',
       })).body)).toBe('workspace-import-refused')
@@ -418,6 +420,21 @@ describe('Cloud Workspaces over HTTP', () => {
       expect(rpcError((await rpc(harness, jarB, 'workspace.import', { gitUrl: pub.url('huge') })).body))
         .toBe('workspace-quota-exceeded')
       expect(workspaceItems((await rpc(harness, jarB, 'workspace.list', {})).body)).toEqual([])
+
+      const victim = await rpc(harness, jarB, 'workspace.create', { title: 'Victim' })
+      const victimBody = victim.body as {
+        result?: { ok?: boolean; value?: { workspace: { workspaceId: string; path: string } } }
+      }
+      const victimId = victimBody.result?.value?.workspace.workspaceId
+      const victimPath = victimBody.result?.value?.workspace.path
+      expect((await rpc(harness, jarB, 'workspace.write', {
+        workspaceId: victimId, path: 'secret.txt', data: 'keep',
+      })).status).toBe(200)
+      await symlink(join(victimPath!, 'secret.txt'), join(workspacePath!, 'planted'))
+      expect(rpcError((await rpc(harness, jarA, 'workspace.write', {
+        workspaceId, path: 'planted', data: 'pwn',
+      })).body)).toBe('workspace-invalid-path')
+      expect(await readFile(join(victimPath!, 'secret.txt'), 'utf8')).toBe('keep')
     } finally {
       await pub.close()
       await priv.close()

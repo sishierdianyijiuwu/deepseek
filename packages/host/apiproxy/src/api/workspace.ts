@@ -69,8 +69,10 @@ export interface WorkspaceApi {
    * a tree past 1 GiB fails with `workspace-quota-exceeded`. Local Hosts
    * without cloud Workspaces also fail with `workspace-import-refused`.
    */
-  import(request: RpcRequest<{ gitUrl: string; title?: string }>):
-  Promise<RpcResponse<{ workspace: WorkspaceView; created: boolean }>>
+  import(
+    request: RpcRequest<{ gitUrl: string; title?: string }>,
+    signal: AbortSignal,
+  ): Promise<RpcResponse<{ workspace: WorkspaceView; created: boolean }>>
 
   /**
    * Renames a workspace. `title` is trimmed and must be non-empty

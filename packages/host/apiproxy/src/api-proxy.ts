@@ -40,6 +40,7 @@ import {
   CloudWorkspaceQuotaError,
   MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
+  redactGitUrl,
 } from '@deepseek-ai/dsh-workspace-cloud'
 // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
 import {
@@ -3010,14 +3011,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
       },
 
-      async import(request) {
+      async import(request, signal) {
         const { gitUrl, title } = request.payload
         const cloud = ctx.get('cloudWorkspaces')
         if (cloud === undefined) {
           return err(request, {
             code: 'workspace-import-refused',
             message: 'git Import requires cloud Workspaces',
-            details: { gitUrl },
+            details: { gitUrl: redactGitUrl(gitUrl) },
           })
         }
         const account = currentAccountId()
@@ -3029,7 +3030,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         try {
-          const workspace = await cloud.importPublicGit(account, gitUrl, title)
+          const workspace = await cloud.importPublicGit(account, gitUrl, title, signal)
           return ok(request, { workspace: workspaceView(workspace), created: true })
         } catch (error: unknown) {
           if (error instanceof CloudWorkspaceLimitError) {
