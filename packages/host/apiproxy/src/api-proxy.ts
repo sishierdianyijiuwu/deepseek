@@ -1237,6 +1237,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return inspected.meta
   }
 
+  /**
+   * When isolation is active, a session id that is not a live Session owned
+   * by the caller answers `session-not-found`. Cancel and updateQueue only
+   * mutate attached Agents, so this does not inspect persistence.
+   */
+  function refuseInvisibleSession(
+    request: RpcRequest<unknown>,
+    sessionId: SessionId,
+  ): RpcResponse<{ accepted: true }> | undefined {
+    if (!isolationActive()) return undefined
+    const attached = ctx.sessions.get(sessionId)
+    if (attached !== undefined && headerVisible(attached.header)) return undefined
+    return err(request, {
+      code: 'session-not-found',
+      message: `session "${sessionId}" not found`,
+      details: { sessionId },
+    })
+  }
+
   // Cold resume composes the preset the session recorded, for the same reason
   // `session.create` does: its history was produced under that composition.
   // Every generic entry point — prompt, models, commands — arrives here, so
@@ -2065,6 +2084,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 ],
                 limit: requestedPageLimit,
                 ...requestedCursor === undefined ? {} : { cursor: requestedCursor },
+                ...isolationActive()
+                  ? { sessionFilters: [{ kind: 'id' as const, values: [...visibleIds] }] }
+                  : {},
               }, { signal })
             } catch (error: unknown) {
               if (isAborted(signal)) return cancelled()
@@ -2097,11 +2119,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 `session search provider returned ${providerItemCount} items; maximum is ${requestedPageLimit}`,
               )
             }
-            // Host visibility is the authorization boundary. Consume the
-            // provider's globally ranked results rather than binding every
-            // visible id into one SQLite statement, then require each hit to
-            // name a visible session and a current message from that same
-            // session before emitting its snippet.
+            // Host revalidation remains the authorization boundary. When
+            // Accounts are composed the provider query also binds visible
+            // ids; each hit must still name a visible session and a current
+            // message from that same session.
             for (const hit of page.items) {
               if (authorized.length > SESSION_SEARCH_RESULT_LIMIT) continue
               if (
@@ -2543,25 +2564,27 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
       },
 
-      updateQueue(request) {
+      async updateQueue(request) {
         const { sessionId, itemId, action } = request.payload
         if (action.kind === 'edit' && action.content.some(block => block.type !== 'text')) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'attachment-error',
             message: 'queue edits accept text content only',
             details: { reason: 'QUEUE_EDIT_NON_TEXT' },
-          }))
+          })
         }
+        const hidden = await refuseInvisibleSession(request, sessionId)
+        if (hidden !== undefined) return hidden
         const agent = ctx.agents.get(sessionId)
         if (agent !== undefined && hasSubagentOwner(agent.session, agent)) {
-          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+          return err(request, subagentOwnershipError(sessionId))
         }
         if (agent === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'queue-item-not-found',
             message: 'queued item is no longer pending',
             details: { itemId },
-          }))
+          })
         }
         const target = agent.inbox.nextTurn.some(message => message.id === itemId)
           ? 'next-turn'
@@ -2571,18 +2594,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           : (target === 'next-turn' ? agent.inbox.nextTurn : agent.inbox.nextStep)
             .find(candidate => candidate.id === itemId)
         if (target === undefined || message === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'queue-item-not-found',
             message: 'queued item is no longer pending',
             details: { itemId },
-          }))
+          })
         }
         if (action.kind === 'steer' && (target !== 'next-turn' || agent.status !== 'running')) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'steer-unavailable',
             message: 'current turn no longer accepts steering',
             details: { itemId },
-          }))
+          })
         }
         if (action.kind === 'edit') {
           agent.inbox.replace(itemId, freezeMessage({ ...message, content: action.content }))
@@ -2590,24 +2613,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           agent.inbox.remove(itemId)
           if (action.kind === 'steer') agent.steer(message)
         }
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
 
-      cancel(request) {
+      async cancel(request) {
         const { sessionId } = request.payload
+        const hidden = await refuseInvisibleSession(request, sessionId)
+        if (hidden !== undefined) return hidden
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'session-not-found',
             message: `session "${sessionId}" not found (not attached)`,
             details: { sessionId },
-          }))
+          })
         }
         if (hasSubagentOwner(agent.session, agent)) {
-          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+          return err(request, subagentOwnershipError(sessionId))
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
     },
 
@@ -2951,7 +2976,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // start from, so a saved default has to be what it reports.
           provider: selection.provider,
           model: selection.model,
-          attachedSessions: ctx.agents.list().length,
+          attachedSessions: isolationActive()
+            ? ctx.agents.list().filter(agent => headerVisible(agent.session.header)).length
+            : ctx.agents.list().length,
           home: homedir(),
           canOpenPath: canOpenPaths(),
         }))
@@ -3669,6 +3696,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     downloads: {
       async sessionLog(request, signal) {
+        // A live Session the caller cannot see 404s before flush or `readRaw`.
+        const attached = ctx.sessions.get(request.sessionId)
+        if (attached !== undefined && !headerVisible(attached.header)) {
+          return new Response('session not found', { status: 404 })
+        }
         // Clean error path first: missing services answer 500 and a missing
         // root artifact 404 before any zip byte is produced. The root content
         // read here is reused as the first zip entry, so nothing is read twice.
@@ -3691,6 +3723,20 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           attachments: deps.attachments,
           sessions: deps.sessions,
         }
+        if (attached === undefined && isolationActive()) {
+          try {
+            const meta = (await deps.sessionPersistence.list(signal))
+              .find(header => header.id === request.sessionId)
+            if (meta === undefined || !headerVisible(meta)) {
+              return new Response('session not found', { status: 404 })
+            }
+          } catch {
+            // persistence.list failed; abort wins over this 500. Do not echo
+            // the error: it may carry absolute host paths.
+            signal.throwIfAborted()
+            return new Response('session log export failed to prepare the stored artifact', { status: 500 })
+          }
+        }
         let root: SessionRawArtifact | undefined
         try {
           await flushLiveSessionLog(deps, request.sessionId, signal)
@@ -3702,7 +3748,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // which may carry absolute host paths into the browser error bar.
           return new Response('session log export failed to prepare the stored artifact', { status: 500 })
         }
-        if (root === undefined || !headerVisible(root.meta)) {
+        if (root === undefined) {
           return new Response('session not found', { status: 404 })
         }
         return new Response(

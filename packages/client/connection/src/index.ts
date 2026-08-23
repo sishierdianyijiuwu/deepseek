@@ -197,6 +197,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         path,
         handler: (req, socket, head) => {
           void authorizeApiUpgrade(apiCtx, req, socket, head, trustedHosts, handle)
+            .catch(() => { rejectUnauthorizedUpgrade(socket) })
         },
       }), `client-connection: ${path} WebSocket`)
     }
@@ -246,7 +247,14 @@ async function authorizeApiUpgrade(
     rejectWebSocketUpgrade(socket)
     return
   }
-  const account = await resolveApiAccount(ctx, req)
+  let account: AccountId | undefined | 'required'
+  try {
+    account = await resolveApiAccount(ctx, req)
+  } catch {
+    // lookupSignIn I/O failed: close the duplex rather than leave it hanging.
+    rejectUnauthorizedUpgrade(socket)
+    return
+  }
   if (account === 'required') {
     rejectUnauthorizedUpgrade(socket)
     return

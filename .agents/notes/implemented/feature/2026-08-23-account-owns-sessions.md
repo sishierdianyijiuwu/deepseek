@@ -12,7 +12,7 @@ Host `/api` treated reachability as operator identity. After Accounts exist, two
 
 When `ctx.accounts` is composed, `dsh-client-connection` requires a live `dsh_sign_in` cookie on every `/api` HTTP request and WebSocket upgrade. Missing or dead cookies answer 401; `/auth` and static routes stay callable. `runWithAccount` binds the Account for that request.
 
-`SessionHeader.owner` stores the Account id on JSONL header metadata and SQLite `sessions.owner` (schema 18). `session.create` stamps the signed-in Account. `session.list`, search, history, prompt, export, fork, mux, and host session frames include only Sessions whose owner equals that Account. Opening another Account's id, or a Session with no owner, fails as not found. Local compositions without `ctx.accounts` do not stamp or filter owner.
+`SessionHeader.owner` stores the Account id on JSONL header metadata and SQLite `sessions.owner` (schema 18). `session.create` stamps the signed-in Account; fork and subagent `childSessionMeta` copy it. `session.list`, search, history, prompt, cancel, updateQueue, export, fork, mux, and host session frames include only Sessions whose owner equals that Account. Opening another Account's id, or a Session with no owner, fails as not found, including before export flush/`readRaw`. Search binds visible ids as `sessionFilters` when Accounts are composed. Local compositions without `ctx.accounts` do not stamp or filter owner.
 
 ## Alternatives considered
 
@@ -28,4 +28,4 @@ Hosted HTTP tests with two cookie jars are the source of truth. Password reset, 
 
 ## Required verification
 
-HTTP: unauthenticated `/api` is 401; `/auth/me` and a missing static path work without a cookie; two jars isolate `session.create`/`list`/`history`/`prompt`; mux of one jar does not receive the other's Session id; a Session with no owner is absent from `list`.
+HTTP: unauthenticated `/api` is 401, including a dead cookie and an unauthenticated mux upgrade; `/auth/me` and a missing static path work without a cookie; two jars isolate `session.create`/`list`/`history`/`prompt`/`cancel`/`updateQueue`/`fork`/`search`/`export`; the owning jar's mux receives the new Session id and the other jar's mux does not; a Session with no owner is absent from `list`.

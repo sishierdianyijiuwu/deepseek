@@ -4,7 +4,7 @@
  * this pins the in-process ApiProxy filter the Host route binds.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Accounts, accountId, runWithAccount } from '@deepseek-ai/dsh-account'
 import type { RegisterResult, SignInLookup, SignInResult, SignInSessionId, VerifyEmailResult } from '@deepseek-ai/dsh-account'
@@ -61,7 +61,14 @@ async function harness(): Promise<{ ctx: Context; api: ApiProxy }> {
       })
       const agent = {} as Agent
       const agentCtx = ownerCtx.extend({ agent })
-      Object.assign(agent, { id: session.id, session, status: 'idle', ctx: agentCtx })
+      Object.assign(agent, {
+        id: session.id,
+        session,
+        status: 'idle',
+        ctx: agentCtx,
+        inbox: { nextTurn: [], nextStep: [] },
+        cancel: () => undefined,
+      })
       await options.setup?.(agentCtx)
       ctx.agents.register(agent)
       return { agent, dispose: () => Promise.resolve() }
@@ -110,6 +117,53 @@ describe('Account-owned Sessions', () => {
     expect(promptB.result.ok).toBe(false)
     if (promptB.result.ok) throw new Error('cross-account prompt must fail')
     expect(promptB.result.error.code).toBe('session-not-found')
+
+    const queueA = await runWithAccount(accountA, () => api.sessions.updateQueue(request({
+      sessionId,
+      itemId: 'item-1' as never,
+      action: { kind: 'remove' as const },
+    })))
+    expect(queueA.result.ok).toBe(false)
+    if (queueA.result.ok) throw new Error('own-session updateQueue should reach the inbox')
+    expect(queueA.result.error.code).toBe('queue-item-not-found')
+
+    const cancelB = await runWithAccount(accountB, () => api.sessions.cancel(request({ sessionId })))
+    expect(cancelB.result.ok).toBe(false)
+    if (cancelB.result.ok) throw new Error('cross-account cancel must fail')
+    expect(cancelB.result.error.code).toBe('session-not-found')
+
+    const queueB = await runWithAccount(accountB, () => api.sessions.updateQueue(request({
+      sessionId,
+      itemId: 'item-1' as never,
+      action: { kind: 'remove' as const },
+    })))
+    expect(queueB.result.ok).toBe(false)
+    if (queueB.result.ok) throw new Error('cross-account updateQueue must fail')
+    expect(queueB.result.error.code).toBe('session-not-found')
+
+    const exportB = await runWithAccount(accountB, () => api.downloads.sessionLog(
+      { sessionId },
+      new AbortController().signal,
+    ))
+    expect(exportB.status).toBe(404)
+    expect(await exportB.text()).toBe('session not found')
+
+    const describeA = await runWithAccount(accountA, () => api.host.describe(request({})))
+    const describeB = await runWithAccount(accountB, () => api.host.describe(request({})))
+    expect(describeA.result.ok).toBe(true)
+    expect(describeB.result.ok).toBe(true)
+    if (describeA.result.ok) expect(describeA.result.value.attachedSessions).toBe(1)
+    if (describeB.result.ok) expect(describeB.result.value.attachedSessions).toBe(0)
+
+    const searchSessions = vi.fn((_req: { sessionFilters?: unknown }) => Promise.resolve({ items: [] }))
+    ctx.provide('sessionQuery', { searchSessions } as never)
+    await runWithAccount(accountA, () => api.sessions.search(
+      request({ query: 'hit' }),
+      new AbortController().signal,
+    ))
+    expect(searchSessions.mock.calls[0]?.[0]).toMatchObject({
+      sessionFilters: [{ kind: 'id', values: [sessionId] }],
+    })
   })
 
   it('hides a Session whose header has no owner', async () => {

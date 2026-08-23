@@ -5,6 +5,7 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import SubagentRuntime, {
+  childSessionMeta,
   foldSubagentDescriptor,
   snapshotSubagentDescriptor,
   SUBAGENT_DESCRIPTOR_VERSION,
@@ -18,7 +19,7 @@ import SubagentRuntime, {
   type SubagentRunEndInfo,
   type SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionOwnerId } from '@deepseek-ai/dsh-session'
 
 function fakeParent(id = 'parent-1'): Agent {
   return { id: SessionId(id) } as unknown as Agent
@@ -492,5 +493,21 @@ describe('subagent descriptors', () => {
     }, 'toolFilter.deny must be an array of strings'],
   ])('rejects a malformed persisted descriptor: %s', (_case, data, detail) => {
     expect(() => foldSubagentDescriptor([event(data)])).toThrow(detail)
+  })
+})
+
+describe('childSessionMeta', () => {
+  it('copies the parent Session Account owner onto the child', () => {
+    const parent = {
+      session: {
+        header: {
+          id: SessionId('parent-1'),
+          cwd: '/work',
+          owner: 'account-1' as SessionOwnerId,
+        },
+      },
+      ctx: { get: () => undefined },
+    } as unknown as Agent
+    expect(childSessionMeta(parent, 1, 0).owner).toBe('account-1')
   })
 })

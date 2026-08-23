@@ -37,6 +37,10 @@ afterEach(async () => {
 class CookieJar {
   private readonly values = new Map<string, string>()
 
+  set(name: string, value: string): void {
+    this.values.set(name, value)
+  }
+
   header(): string {
     return [...this.values.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
   }
@@ -76,13 +80,42 @@ class IsolatedApiProxy extends Service {
         })
         const agent = {} as Agent
         const agentCtx = ownerCtx.extend({ agent })
-        Object.assign(agent, { id: session.id, session, status: 'idle', ctx: agentCtx })
+        Object.assign(agent, {
+          id: session.id,
+          session,
+          status: 'idle',
+          ctx: agentCtx,
+          inbox: { nextTurn: [], nextStep: [] },
+          cancel: () => undefined,
+        })
         await options.setup?.(agentCtx)
         ctx.agents.register(agent)
         return { agent, dispose: () => Promise.resolve() }
       },
       resume: () => Promise.reject(new Error('http isolation tests create live sessions')),
     })
+    ctx.provide('sessionQuery', {
+      searchSessions: (req: { sessionFilters?: readonly { kind: string; values?: readonly string[] }[] }) => {
+        const allowed = new Set(req.sessionFilters?.find(item => item.kind === 'id')?.values ?? [])
+        return Promise.resolve({
+          items: ctx.sessions.list()
+            .filter(session => allowed.has(session.id))
+            .map(session => ({
+              header: session.header,
+              live: true,
+              persisted: false,
+              bestMatch: {
+                sessionId: session.id,
+                seq: 0,
+                type: 'user/message',
+                time: 1,
+                surface: 'current',
+                snippet: `hit ${session.id}`,
+              },
+            })),
+        })
+      },
+    } as never)
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
       cwd: root ?? '/tmp',
@@ -223,6 +256,44 @@ function sessionIds(body: unknown): string[] {
   return result?.value?.items?.map(item => item.sessionId) ?? []
 }
 
+function rpcError(body: unknown): string | undefined {
+  return (body as { result?: { ok?: boolean; error?: { code: string } } }).result?.error?.code
+}
+
+function openMux(harness: Harness, jar: CookieJar | undefined): {
+  socket: WebSocket
+  frames: string[]
+  opened: Promise<void>
+  status: Promise<number | undefined>
+} {
+  const frames: string[] = []
+  let status: number | undefined
+  const socket = new WebSocket(`ws://127.0.0.1:${String(harness.port)}/api/events.mux`, {
+    headers: {
+      ...jar === undefined ? {} : { cookie: jar.header() },
+      origin: `http://127.0.0.1:${String(harness.port)}`,
+    },
+  })
+  const opened = new Promise<void>((resolve, reject) => {
+    socket.once('open', () => { resolve() })
+    socket.once('unexpected-response', (_req, response) => {
+      status = response.statusCode
+      response.resume()
+      reject(new Error(`mux upgrade ${String(response.statusCode)}`))
+    })
+    socket.once('error', (error) => { reject(error) })
+  })
+  socket.on('message', (data) => {
+    frames.push(String(data))
+  })
+  return {
+    socket,
+    frames,
+    opened,
+    status: opened.then(() => status, () => status),
+  }
+}
+
 describe('Account-owned Sessions over HTTP', () => {
   it('rejects unauthenticated /api, isolates two cookie jars, and keeps auth/static open', { timeout: 60_000 }, async () => {
     const harness = await boot()
@@ -254,24 +325,50 @@ describe('Account-owned Sessions over HTTP', () => {
 
     const historyB = await rpc(harness, jarB, 'session.history', { sessionId })
     expect(historyB.status).toBe(200)
-    expect((historyB.body as { result?: { ok?: boolean; error?: { code: string } } }).result).toMatchObject({
-      ok: false,
-      error: { code: 'session-not-found' },
-    })
+    expect(rpcError(historyB.body)).toBe('session-not-found')
 
     const promptB = await rpc(harness, jarB, 'session.prompt', {
       sessionId,
       mode: 'queue',
       content: [{ type: 'text', text: 'hi' }],
     })
-    expect((promptB.body as { result?: { error?: { code: string } } }).result).toMatchObject({
-      error: { code: 'session-not-found' },
-    })
+    expect(rpcError(promptB.body)).toBe('session-not-found')
+
+    expect(rpcError((await rpc(harness, jarA, 'session.updateQueue', {
+      sessionId,
+      itemId: 'item-1',
+      action: { kind: 'remove' },
+    })).body)).toBe('queue-item-not-found')
+    expect(rpcError((await rpc(harness, jarB, 'session.cancel', { sessionId })).body)).toBe('session-not-found')
+    expect(rpcError((await rpc(harness, jarB, 'session.updateQueue', {
+      sessionId,
+      itemId: 'item-1',
+      action: { kind: 'remove' },
+    })).body)).toBe('session-not-found')
+    expect(rpcError((await rpc(harness, jarB, 'session.fork', { sessionId })).body)).toBe('session-not-found')
+    expect((await raw(harness, jarB, `/api/session.export?sessionId=${encodeURIComponent(sessionId!)}`)).status).toBe(404)
+    expect(sessionIds((await rpc(harness, jarA, 'session.list', {})).body)).toEqual([sessionId])
 
     const createdB = await rpc(harness, jarB, 'session.create', {})
     const sessionB = (createdB.body as { result?: { value?: { sessionId: string } } }).result?.value?.sessionId
     expect(sessionIds((await rpc(harness, jarA, 'session.list', {})).body)).toEqual([sessionId])
     expect(sessionIds((await rpc(harness, jarB, 'session.list', {})).body)).toEqual([sessionB])
+
+    const searchA = await rpc(harness, jarA, 'session.search', { query: 'hit' })
+    const searchB = await rpc(harness, jarB, 'session.search', { query: 'hit' })
+    expect((searchA.body as { result?: { value?: { items?: { sessionId: string }[] } } }).result?.value?.items
+      ?.map(item => item.sessionId)).toEqual([sessionId])
+    expect((searchB.body as { result?: { value?: { items?: { sessionId: string }[] } } }).result?.value?.items
+      ?.map(item => item.sessionId)).toEqual([sessionB])
+
+    const dead = new CookieJar()
+    dead.set(SIGN_IN_COOKIE, 'deadbeef')
+    expect((await rpc(harness, dead, 'session.list', {})).status).toBe(401)
+
+    const anonymousMux = openMux(harness, undefined)
+    await expect(anonymousMux.opened).rejects.toThrow()
+    expect(await anonymousMux.status).toBe(401)
+    anonymousMux.socket.close()
 
     context?.sessions.create(SessionId('orphan'), { meta: { cwd: root as string } })
     expect(sessionIds((await rpc(harness, jarA, 'session.list', {})).body)).toEqual([sessionId])
@@ -282,27 +379,16 @@ describe('Account-owned Sessions over HTTP', () => {
     const password = 'correct-horse'
     const jarA = await signInAccount(harness, 'mux-a@example.com', password)
     const jarB = await signInAccount(harness, 'mux-b@example.com', password)
-
-    const frames: string[] = []
-    const socket = new WebSocket(`ws://127.0.0.1:${String(harness.port)}/api/events.mux`, {
-      headers: {
-        cookie: jarB.header(),
-        origin: `http://127.0.0.1:${String(harness.port)}`,
-      },
-    })
-    const opened = new Promise<void>((resolve, reject) => {
-      socket.once('open', () => { resolve() })
-      socket.once('error', (error) => { reject(error) })
-    })
-    socket.on('message', (data) => {
-      frames.push(String(data))
-    })
-    await opened
+    const muxA = openMux(harness, jarA)
+    const muxB = openMux(harness, jarB)
+    await Promise.all([muxA.opened, muxB.opened])
 
     const created = await rpc(harness, jarA, 'session.create', {})
     const sessionId = (created.body as { result?: { value?: { sessionId: string } } }).result?.value?.sessionId
-    await new Promise(resolve => setTimeout(resolve, 100))
-    socket.close()
-    expect(frames.join('\n')).not.toContain(sessionId ?? 'missing-id')
+    expect(sessionId).toEqual(expect.any(String))
+    await expect.poll(() => muxA.frames.join('\n').includes(sessionId!), { timeout: 5_000 }).toBe(true)
+    muxA.socket.close()
+    muxB.socket.close()
+    expect(muxB.frames.join('\n')).not.toContain(sessionId)
   })
 })
