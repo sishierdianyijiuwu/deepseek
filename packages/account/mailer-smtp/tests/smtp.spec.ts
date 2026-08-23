@@ -25,7 +25,9 @@ vi.mock('node:tls', async (importOriginal) => {
         })
         return socket
       }
-      const socket = net.connect({ host: options.host, port: options.port }, callback)
+      const port = options.port
+      if (port === undefined) throw new Error('tls mock: port is required')
+      const socket = net.connect({ host: options.host, port }, callback)
       socket.once('connect', () => {
         socket.emit('secureConnect')
       })
