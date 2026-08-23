@@ -27,6 +27,9 @@
       "path": "../../api/remotes/tsconfig.host.json"
     },
     {
+      "path": "../../account/account"
+    },
+    {
       "path": "../../util/brand"
     },
     {

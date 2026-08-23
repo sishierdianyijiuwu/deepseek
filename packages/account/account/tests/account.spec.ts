@@ -3,11 +3,15 @@ import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import {
   accountId,
+  cookieValue,
+  currentAccountId,
   equalSecretHash,
   hashPassword,
   hashSecret,
   mintSecret,
   normalizeEmail,
+  runWithAccount,
+  SIGN_IN_COOKIE,
   signInSessionId,
   verifyPassword,
 } from '../src/index.ts'
@@ -65,6 +69,18 @@ describe('ids', () => {
   it('brands Account and Sign-in session ids', () => {
     expect(accountId('a1')).toBe('a1')
     expect(signInSessionId('s1')).toBe('s1')
+  })
+})
+
+describe('request Account', () => {
+  it('parses the Sign-in cookie and binds the Account for one async chain', () => {
+    expect(cookieValue(undefined, SIGN_IN_COOKIE)).toBeUndefined()
+    expect(cookieValue(`${SIGN_IN_COOKIE}=tok`, SIGN_IN_COOKIE)).toBe('tok')
+    expect(currentAccountId()).toBeUndefined()
+    const seen = runWithAccount(accountId('a1'), () => currentAccountId())
+    expect(seen).toBe('a1')
+    expect(currentAccountId()).toBeUndefined()
+    expect(runWithAccount(undefined, () => currentAccountId())).toBeUndefined()
   })
 })
 

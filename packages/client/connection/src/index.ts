@@ -1,6 +1,15 @@
 /** Host HTTP bridge for browser-client RPC. */
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import {
+  SIGN_IN_COOKIE,
+  cookieValue,
+  runWithAccount,
+  signInSessionId,
+  type AccountId,
+} from '@deepseek-ai/dsh-account'
 import type {} from '@deepseek-ai/dsh-attachment'
 // Activates the webServer Context merge used below.
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -9,7 +18,7 @@ import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
-import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
+import { rejectUnauthorizedUpgrade, rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
 export type {
   ConnectionRpcAuthority,
@@ -167,7 +176,13 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         res.end('forbidden')
         return
       }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      const account = await resolveApiAccount(ctx, req)
+      if (account === 'required') {
+        res.writeHead(401)
+        res.end('unauthorized')
+        return
+      }
+      await runWithAccount(account, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
@@ -181,11 +196,8 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       apiCtx.effect(() => apiCtx.webServer.registerUpgrade({
         path,
         handler: (req, socket, head) => {
-          if (!isTrustedApiRequest(req, trustedHosts)) {
-            rejectWebSocketUpgrade(socket)
-            return
-          }
-          return handle(req, socket, head)
+          void authorizeApiUpgrade(apiCtx, req, socket, head, trustedHosts, handle)
+            .catch(() => { rejectUnauthorizedUpgrade(socket) })
         },
       }), `client-connection: ${path} WebSocket`)
     }
@@ -193,4 +205,59 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
     registerDownlink(MUX_EVENTS_PATH, (req, socket, head) => { downlinks.handleMux(req, socket, head) })
     registerDownlink(HOST_EVENTS_PATH, (req, socket, head) => { downlinks.handleHost(req, socket, head) })
   })
+}
+
+/**
+ * Resolve the signed-in Account for one `/api` request when Accounts are composed.
+ * @param ctx - Host context that may carry `accounts`.
+ * @param req - incoming HTTP or upgrade request.
+ * @returns the Account id, `undefined` when Accounts are not composed, or
+ *   `'required'` when they are composed and the cookie is missing or dead.
+ */
+async function resolveApiAccount(
+  ctx: { get: Context['get'] },
+  req: IncomingMessage,
+): Promise<AccountId | undefined | 'required'> {
+  const accounts = ctx.get('accounts')
+  if (accounts === undefined) return undefined
+  const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
+  if (id === undefined) return 'required'
+  const session = await accounts.lookupSignIn(signInSessionId(id))
+  return session === undefined ? 'required' : session.accountId
+}
+
+/**
+ * Trust-fence then Sign-in check for one `/api` WebSocket upgrade.
+ * @param ctx - Host context that may carry `accounts`.
+ * @param req - upgrade request.
+ * @param socket - raw socket transferred by the HTTP server.
+ * @param head - bytes already read after the upgrade headers.
+ * @param trustedHosts - deployment authorities accepted by the Host fence.
+ * @param handle - mux or host downlink after authorization.
+ */
+async function authorizeApiUpgrade(
+  ctx: { get: Context['get'] },
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  trustedHosts: readonly string[],
+  handle: WebUpgradeRoute['handler'],
+): Promise<void> {
+  if (!isTrustedApiRequest(req, trustedHosts)) {
+    rejectWebSocketUpgrade(socket)
+    return
+  }
+  let account: AccountId | undefined | 'required'
+  try {
+    account = await resolveApiAccount(ctx, req)
+  } catch {
+    // lookupSignIn I/O failed: close the duplex rather than leave it hanging.
+    rejectUnauthorizedUpgrade(socket)
+    return
+  }
+  if (account === 'required') {
+    rejectUnauthorizedUpgrade(socket)
+    return
+  }
+  await runWithAccount(account, () => handle(req, socket, head))
 }

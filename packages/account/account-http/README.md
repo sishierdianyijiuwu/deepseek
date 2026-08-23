@@ -18,7 +18,7 @@ HTTP Consumer that registers unauthenticated auth routes on `ctx.webServer` besi
 | GET | `/reset` | `?token=` named host route; redirects to `/?reset=<token>` without consuming |
 | HEAD | `/reset` | 200; does not consume the token |
 
-The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`; `Max-Age` so closing the browser does not end it). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }` (`mail_failed` when the Unverified Account row exists but the mailer rejected the send); carrier failures use 400/405/413/415/404.
+The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`; `Max-Age` so closing the browser does not end it). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. When `ctx.accounts` is composed, the Host `/api` carrier (`dsh-client-connection`) requires this cookie and binds the Account for Session isolation; auth and static routes stay callable without it. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }` (`mail_failed` when the Unverified Account row exists but the mailer rejected the send); carrier failures use 400/405/413/415/404.
 
 ## Model Experience
 
@@ -30,5 +30,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **Does not gate `/api` Session methods** — unauthenticated Host RPC remains a later Account-owned Sessions ticket.
 - **Cookie name is a protocol constant** — not a product name; product copy still says Sign-in session.

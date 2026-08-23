@@ -42,7 +42,7 @@
 - `session.surface` 暴露只读 `SessionSurface` 视图，由会话唯一的增量 surface 管理器所有；每次提交重写，`replaceGeneration` 都会变化。
 - `session.events` 是按追加失效的缓存冻结快照；已接受事件保持深度冻结。
 - `session.seq`、`session.id`：当前序号和只读类型化身份。
-- `session.header: SessionHeader`：脱离、深冻结的创建元数据（`version`、`id`、`createdAt`，以及可选的 `cwd`／`parentSession`／`seedLength`／`delegationDepth`）。构造时会校验持久记录，并要求其中的 id 与 `session.id` 一致。
+- `session.header: SessionHeader`：脱离、深冻结的创建元数据（`version`、`id`、`createdAt`，以及可选的 `cwd`／`parentSession`／`seedLength`／`delegationDepth`／`agentPreset`／`owner`）。构造时会校验持久记录，并要求其中的 id 与 `session.id` 一致。`owner` 是托管 Session 上的 Account id；本机单 home Session 没有该字段。
 
 ### 无损 JSON 工具
 
