@@ -157,7 +157,7 @@ class FakeCredentials extends Service {
 class FakeE2B extends Service {
   readonly perExecutingSession = true
   readonly cwd = '/home/user/workspace'
-  private readonly slots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
+  private readonly accountSlots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
   private chain: Promise<unknown> = Promise.resolve()
   /** Resolved when `startExecutingSession` is called, before it joins the Account chain. */
   startEnqueued: PromiseWithResolvers<undefined> | undefined
@@ -181,14 +181,14 @@ class FakeE2B extends Service {
   async startExecutingSession(accountId: AccountId, sessionId: SessionId) {
     this.startEnqueued?.resolve(undefined)
     return this.enqueue(async () => {
-      const existing = this.slots.get(accountId)
+      const existing = this.accountSlots.get(accountId)
       if (existing !== undefined && existing.sessionId !== sessionId) {
         throw new ExecutingSessionBusyError(existing.sessionId)
       }
       const reused = existing !== undefined && existing.sessionId === sessionId
       const world = existing?.world ?? createRemoteWorld()
       if (!reused) world.created += 1
-      this.slots.set(accountId, { sessionId, world })
+      this.accountSlots.set(accountId, { sessionId, world })
       currentWorld = world
       return { sandbox: world.world, reused }
     })
@@ -206,10 +206,10 @@ class FakeE2B extends Service {
         await barrier.hold.promise
       }
       if (opts?.skipIf?.() === true) return
-      const existing = this.slots.get(accountId)
+      const existing = this.accountSlots.get(accountId)
       if (existing?.sessionId === sessionId) {
         existing.world.killed = true
-        this.slots.delete(accountId)
+        this.accountSlots.delete(accountId)
       }
       if (barrier?.afterDelete === true) {
         barrier.entered.resolve(undefined)
@@ -219,16 +219,16 @@ class FakeE2B extends Service {
   }
 
   executingSessionId(accountId: AccountId): SessionId | undefined {
-    return this.slots.get(accountId)?.sessionId
+    return this.accountSlots.get(accountId)?.sessionId
   }
 
   executingSandbox(accountId: AccountId) {
-    return this.slots.get(accountId)?.world.world
+    return this.accountSlots.get(accountId)?.world.world
   }
 
   killLiveSlots(): void {
-    for (const existing of this.slots.values()) existing.world.killed = true
-    this.slots.clear()
+    for (const existing of this.accountSlots.values()) existing.world.killed = true
+    this.accountSlots.clear()
   }
 }
 
