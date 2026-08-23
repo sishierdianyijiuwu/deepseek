@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-23-operator-ban-and-registration-freeze.md
+2026-08-23-operator-ban-and-registration-freeze.md: a3da2a76835998eb942c06c392575052e233eb34
+2026-08-23-operator-ban-and-registration-freeze.zh.md: 73a8976acd1be8905d28dce7401ec1b919971bfd

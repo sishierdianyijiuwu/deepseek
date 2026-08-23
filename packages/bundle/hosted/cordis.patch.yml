@@ -19,6 +19,7 @@
       config:
         url: !!js process.env.DSH_POSTGRES_URL
         publicBaseUrl: !!js process.env.DSH_PUBLIC_BASE_URL
+        operatorEmails: !!js (process.env.DSH_OPERATOR_EMAILS ?? '').split(',').map(s => s.trim()).filter(Boolean)
 
     - id: account-http
       name: '@deepseek-ai/dsh-account-http'

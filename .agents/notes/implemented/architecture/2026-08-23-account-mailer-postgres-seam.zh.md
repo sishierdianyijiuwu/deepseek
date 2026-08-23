@@ -38,7 +38,11 @@ Status: implemented
 | POST | `/auth/resend-verification` |
 | POST | `/auth/request-password-reset` |
 | POST | `/auth/reset-password` |
-| GET | `/auth/me` |
+| GET | `/auth/me`（含 `operator`） |
+| POST | `/auth/operator/ban` |
+| POST | `/auth/operator/lift-ban` |
+| POST | `/auth/operator/freeze-registration` |
+| GET | `/auth/operator/registration` |
 | GET | `/verify`（`HEAD` 返回 200 且不消费令牌） |
 | GET | `/reset`（`HEAD` 返回 200 且不消费令牌） |
 
@@ -54,7 +58,7 @@ Password 是 scrypt 单向哈希（`scrypt$N$r$p$salt$key`），绝不是 Creden
 
 ### PostgreSQL
 
-ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url` 为 `postgres://…` / `postgresql://…`，或 HTTP 测试使用的进程内 PostgreSQL 引擎 `pglite:`。schema 版本为 `SCHEMA_VERSION = 2`；不匹配则在加载时失败。Session JSONL 仍是文件。
+ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url` 为 `postgres://…` / `postgresql://…`，或 HTTP 测试使用的进程内 PostgreSQL 引擎 `pglite:`。配置 `operatorEmails` 是 Operator 列表（托管 profile：`DSH_OPERATOR_EMAILS`）。schema 版本为 `SCHEMA_VERSION = 3`；不匹配则在加载时失败。`banned_at` 与 `registration_control.frozen_at` 持久化 Ban 和注册冻结。Session JSONL 仍是文件。Ban 与冻结落在这条 seam 上（[Operator Ban](../feature/2026-08-23-operator-ban-and-registration-freeze.zh.md)）。
 
 ### 邮件发送
 
@@ -62,7 +66,7 @@ ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url
 
 ### hosted 与 web
 
-父规范的 Out of Scope 允许本地 `dsh web` 不含 Account。托管组合包是第三个 profile 模板，因此单 home 的 web 不会被悄悄变成 SaaS。托管加载必需环境变量：`DSH_POSTGRES_URL`、`DSH_PUBLIC_BASE_URL`、`DSH_SMTP_HOST`、`DSH_SMTP_FROM`。
+父规范的 Out of Scope 允许本地 `dsh web` 不含 Account。托管组合包是第三个 profile 模板，因此单 home 的 web 不会被悄悄变成 SaaS。托管加载必需环境变量：`DSH_POSTGRES_URL`、`DSH_PUBLIC_BASE_URL`、`DSH_SMTP_HOST`、`DSH_SMTP_FROM`。可选的 `DSH_OPERATOR_EMAILS` 是逗号分隔的 Operator 列表。
 
 ### 测试
 
@@ -86,4 +90,4 @@ ADR 0017：Account 与 Sign-in session 从 v1 起放在 PostgreSQL。配置 `url
 
 ## 后果
 
-七个新包和一个托管 profile 增加了 Loader 行、环境配置，以及托管表面上的 cookie。本地 `dsh web` 仍然没有 Account。`/api` Session 方法在工单 #4 之前仍未认证。Ban 和按 Account 划分的 Credential 仍属后续工单。使用 PGlite、假邮件发送和假时钟的 HTTP 测试钉住注册／验证／登录／退出／重置／滑动，不需要真实 SMTP 或共享 Postgres。
+七个新包和一个托管 profile 增加了 Loader 行、环境配置，以及托管表面上的 cookie。本地 `dsh web` 仍然没有 Account。`/api` Session 方法绑定已登录 Account。Ban 与注册冻结落在这条 seam 上；Deletion 和 Operator Session 访问仍属后续工单。使用 PGlite、假邮件发送和假时钟的 HTTP 测试钉住注册／验证／登录／退出／重置／滑动／Ban／冻结，不需要真实 SMTP 或共享 Postgres。

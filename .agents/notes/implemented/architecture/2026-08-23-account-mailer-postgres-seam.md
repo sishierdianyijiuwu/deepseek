@@ -38,7 +38,11 @@ Unauthenticated routes are named `webServer` registrations, not `session.registe
 | POST | `/auth/resend-verification` |
 | POST | `/auth/request-password-reset` |
 | POST | `/auth/reset-password` |
-| GET | `/auth/me` |
+| GET | `/auth/me` (includes `operator`) |
+| POST | `/auth/operator/ban` |
+| POST | `/auth/operator/lift-ban` |
+| POST | `/auth/operator/freeze-registration` |
+| GET | `/auth/operator/registration` |
 | GET | `/verify` (`HEAD` returns 200 and does not consume the token) |
 | GET | `/reset` (`HEAD` returns 200 and does not consume the token) |
 
@@ -54,7 +58,7 @@ Passwords are scrypt one-way hashes (`scrypt$N$r$p$salt$key`), never Credentials
 
 ### PostgreSQL
 
-ADR 0017: Account and Sign-in session live in PostgreSQL from v1. Config `url` is `postgres://…` / `postgresql://…`, or `pglite:` for the in-process PostgreSQL engine HTTP tests use. Schema version is `SCHEMA_VERSION = 2`; a mismatch fails at load. Session JSONL stays files.
+ADR 0017: Account and Sign-in session live in PostgreSQL from v1. Config `url` is `postgres://…` / `postgresql://…`, or `pglite:` for the in-process PostgreSQL engine HTTP tests use. Config `operatorEmails` is the Operator list (hosted profile: `DSH_OPERATOR_EMAILS`). Schema version is `SCHEMA_VERSION = 3`; a mismatch fails at load. `banned_at` and `registration_control.frozen_at` persist Ban and registration freeze. Session JSONL stays files. Ban and freeze live on this seam ([Operator Ban](../feature/2026-08-23-operator-ban-and-registration-freeze.md)).
 
 ### Mailer
 
@@ -62,7 +66,7 @@ Email is a mailer port (`ctx.mailer.send`). SMTP is configuration (`dsh-mailer-s
 
 ### Hosted vs web
 
-Parent spec Out of Scope allows local `dsh web` without Accounts. The hosted bundle is a third profile template so single-home web is not silently turned into SaaS. Required hosted env: `DSH_POSTGRES_URL`, `DSH_PUBLIC_BASE_URL`, `DSH_SMTP_HOST`, `DSH_SMTP_FROM`.
+Parent spec Out of Scope allows local `dsh web` without Accounts. The hosted bundle is a third profile template so single-home web is not silently turned into SaaS. Required hosted env: `DSH_POSTGRES_URL`, `DSH_PUBLIC_BASE_URL`, `DSH_SMTP_HOST`, `DSH_SMTP_FROM`. Optional `DSH_OPERATOR_EMAILS` is a comma-separated Operator list.
 
 ### Testing
 
@@ -86,4 +90,4 @@ The source of truth is Loader-composed HTTP: real `fetch` against `127.0.0.1:por
 
 ## Consequences
 
-Seven new packages and a hosted profile add Loader rows, env configuration, and a cookie on the hosted surface. Local `dsh web` still has no Account. `/api` Session methods remain unauthenticated until ticket #4. Ban and Account-scoped Credentials stay later tickets. HTTP tests with PGlite, a fake mailer, and a fake clock pin register / verify / sign-in / sign-out / reset / sliding without live SMTP or a shared Postgres.
+Seven new packages and a hosted profile add Loader rows, env configuration, and a cookie on the hosted surface. Local `dsh web` still has no Account. `/api` Session methods bind the signed-in Account. Ban and registration freeze live on this seam; Deletion and Operator Session access stay later tickets. HTTP tests with PGlite, a fake mailer, and a fake clock pin register / verify / sign-in / sign-out / reset / sliding / Ban / freeze without live SMTP or a shared Postgres.

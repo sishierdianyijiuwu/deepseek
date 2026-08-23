@@ -32,7 +32,7 @@ describe('sql adapter', () => {
     const sql = await openSql('pglite:')
     await ensureSchema(sql)
     await ensureSchema(sql)
-    expect(SCHEMA_VERSION).toBe(2)
+    expect(SCHEMA_VERSION).toBe(3)
     const nested = await sql.transaction(async (inner) => {
       await inner.close()
       await inner.transaction(async nestedInner => nestedInner.query('SELECT 1 AS x'))
@@ -54,6 +54,11 @@ describe('postgres accounts', () => {
       .toThrow(/url and publicBaseUrl/)
     expect(() => new PostgresAccounts(new Context(), { url: 'pglite:', publicBaseUrl: '' }))
       .toThrow(/url and publicBaseUrl/)
+    expect(() => new PostgresAccounts(new Context(), {
+      url: 'pglite:',
+      publicBaseUrl: 'http://x',
+      operatorEmails: ['not-an-email'],
+    })).toThrow(/operatorEmails contains an invalid email/)
     const ctx = new Context()
     const accounts = new PostgresAccounts(ctx, { url: 'pglite:', publicBaseUrl: 'http://127.0.0.1' })
     await expect(accounts.register('a@example.com', 'password12')).rejects.toThrow(/not started/)
@@ -107,7 +112,10 @@ describe('postgres accounts', () => {
     const slid = await accounts.lookupSignIn(first.signInId)
     expect(slid?.expiresAt).toBe(nowMs + 100)
     nowMs += 80
-    await expect(accounts.lookupSignIn(first.signInId)).resolves.toMatchObject({ email: 'owner@example.com' })
+    await expect(accounts.lookupSignIn(first.signInId)).resolves.toMatchObject({
+      email: 'owner@example.com',
+      operator: false,
+    })
 
     await accounts.requestPasswordReset('nobody@example.com')
     await accounts.requestPasswordReset('owner@example.com')
@@ -159,6 +167,25 @@ describe('postgres accounts', () => {
     expect(outcomes.sort()).toEqual(['invalid_or_expired', 'ok'])
     const winner = concurrent.find(row => row.ok)
     expect(winner).toBeDefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('rethrows a register failure that is not a unique violation', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+    }).await()
+    const impl = ctx.accounts as unknown as {
+      client: () => { transaction: (fn: unknown) => Promise<unknown> }
+    }
+    vi.spyOn(impl, 'client').mockReturnValue({
+      query: () => Promise.resolve({ rows: [] }),
+      transaction: () => Promise.reject(new Error('disk')),
+    })
+    await expect(ctx.accounts.register('boom@example.com', 'password12')).rejects.toThrow('disk')
     await ctx.fiber.dispose()
   })
 })

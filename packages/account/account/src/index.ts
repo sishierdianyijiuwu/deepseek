@@ -8,6 +8,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {
   AccountId,
+  BanResult,
   RegisterResult,
   ResetPasswordResult,
   SignInLookup,
@@ -22,6 +23,7 @@ export { normalizeEmail } from './email.ts'
 export { SIGN_IN_COOKIE, cookieValue, currentAccountId, runWithAccount } from './request.ts'
 export type {
   AccountId,
+  BanResult,
   PasswordResetMail,
   RegisterResult,
   ResetPasswordResult,
@@ -71,7 +73,8 @@ export abstract class Accounts extends Service {
    * @param password - visitor-supplied Password.
    * @returns `{ ok: true }` when the Unverified Account exists and the
    *   verification message was sent; `mail_failed` when the row exists but
-   *   the mailer rejected the send.
+   *   the mailer rejected the send; `registration_frozen` when an Operator
+   *   has disabled public registration.
    */
   abstract register(email: string, password: string): Promise<RegisterResult>
 
@@ -94,7 +97,7 @@ export abstract class Accounts extends Service {
    * Create a Sign-in session after a verified Account presents the Password.
    * Unknown emails and wrong Passwords share one failure so the call cannot
    * enumerate Accounts. An Unverified Account with the correct Password is a
-   * distinct failure.
+   * distinct failure. A Banned Account with the correct Password is `banned`.
    * @param email - visitor-supplied email.
    * @param password - visitor-supplied Password.
    * @returns a Sign-in session id on success.
@@ -125,12 +128,43 @@ export abstract class Accounts extends Service {
 
   /**
    * Consume a single-use password-reset token, set a new Password, and end
-   * every Sign-in session for that Account.
+   * every Sign-in session for that Account. A Banned Account may still change
+   * the Password; `signIn` stays `banned` until the Ban is lifted.
    * @param token - raw token from the password-reset URL.
    * @param password - visitor-supplied new Password.
    * @returns whether the Password was changed.
    */
   abstract resetPassword(token: string, password: string): Promise<ResetPasswordResult>
+
+  /**
+   * Ban an Account by email. Sign-in and live Sign-in sessions stop; the
+   * Account row remains. Idempotent when already Banned. HTTP Operator
+   * routes are the authorization check; this method does not consult the
+   * operator list.
+   * @param email - target Account email.
+   * @returns `{ ok: true }` when the Account exists, or `not_found`.
+   */
+  abstract ban(email: string): Promise<BanResult>
+
+  /**
+   * Lift a Ban. Idempotent when the Account is not Banned.
+   * @param email - target Account email.
+   * @returns `{ ok: true }` when the Account exists, or `not_found`.
+   */
+  abstract liftBan(email: string): Promise<BanResult>
+
+  /**
+   * Freeze or unfreeze public registration. Frozen `register` returns
+   * `registration_frozen` and does not insert a row.
+   * @param frozen - whether new registration is refused.
+   */
+  abstract setRegistrationFrozen(frozen: boolean): Promise<void>
+
+  /**
+   * Whether public registration is frozen.
+   * @returns true when `register` must return `registration_frozen`.
+   */
+  abstract isRegistrationFrozen(): Promise<boolean>
 }
 
 export default Accounts

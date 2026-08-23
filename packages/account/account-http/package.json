@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-account-http",
-  "description": "HTTP Consumer for Account auth routes beside /api (register, verify, sign in, sign out, password reset)",
+  "description": "HTTP Consumer for Account auth routes beside /api (register, verify, sign in, sign out, password reset, Operator Ban and freeze)",
   "version": "0.1.1-rc.2",
   "publishConfig": {
     "access": "public"
