@@ -1,0 +1,29 @@
+# The dsh-hosted bundle patch: Account, mailer, auth HTTP, and the register /
+# sign-in UI over dsh-base + dsh-web-app. Local `dsh web` does not apply this
+# layer. Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST /
+# DSH_SMTP_FROM fail loud at load.
+
+- insert:
+    - id: mailer
+      name: '@deepseek-ai/dsh-mailer-smtp'
+      config:
+        host: !!js process.env.DSH_SMTP_HOST
+        port: !!js Number(process.env.DSH_SMTP_PORT || 587)
+        secure: !!js process.env.DSH_SMTP_SECURE === '1'
+        from: !!js process.env.DSH_SMTP_FROM
+        username: !!js process.env.DSH_SMTP_USERNAME
+        password: !!js process.env.DSH_SMTP_PASSWORD
+
+    - id: accounts
+      name: '@deepseek-ai/dsh-account-postgres'
+      config:
+        url: !!js process.env.DSH_POSTGRES_URL
+        publicBaseUrl: !!js process.env.DSH_PUBLIC_BASE_URL
+
+    - id: account-http
+      name: '@deepseek-ai/dsh-account-http'
+      config:
+        cookieSecure: !!js process.env.DSH_COOKIE_SECURE === '1'
+
+    - id: ui-account
+      name: '@deepseek-ai/dsh-client-ui-account'

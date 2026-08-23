@@ -28,6 +28,9 @@ describe('parseDshArgs', () => {
     expect(parse(['web'])).toEqual({ mode: 'profile', profile: 'web', patches: [], args: [] })
     expect(parse(['web', '--patch', 'web.yml']))
       .toEqual({ mode: 'profile', profile: 'web', patches: ['web.yml'], args: [] })
+    expect(parse(['hosted'])).toEqual({ mode: 'profile', profile: 'hosted', patches: [], args: [] })
+    expect(parse(['hosted', '--patch', 'hosted.yml']))
+      .toEqual({ mode: 'profile', profile: 'hosted', patches: ['hosted.yml'], args: [] })
   })
 
   it('ends the launcher flags at the first token it does not own', () => {
@@ -68,6 +71,8 @@ describe('parseDshArgs', () => {
       .toEqual({ mode: 'dump-config', profile: 'web', defaultOnly: false, patches: [] })
     expect(parse(['web', '--dump-default-config']))
       .toEqual({ mode: 'dump-config', profile: 'web', defaultOnly: true, patches: [] })
+    expect(parse(['hosted', '--dump-config']))
+      .toEqual({ mode: 'dump-config', profile: 'hosted', defaultOnly: false, patches: [] })
   })
 
   it('rejects missing profile, removed flags, and contradictory inputs', () => {

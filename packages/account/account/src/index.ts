@@ -1,0 +1,112 @@
+/**
+ * Service Definition for the Account capability seam (`ctx.accounts`).
+ * Providers persist Account and Sign-in session rows; the HTTP Consumer
+ * registers unauthenticated routes beside `/api`.
+ * @module @deepseek-ai/dsh-account
+ */
+
+import { Context, Service } from '@deepseek-ai/cordis'
+import type {
+  AccountId,
+  RegisterResult,
+  SignInLookup,
+  SignInResult,
+  SignInSessionId,
+  VerifyEmailResult,
+} from './types.ts'
+
+export { hashPassword, verifyPassword } from './password.ts'
+export { equalSecretHash, hashSecret, mintSecret } from './secret.ts'
+export { normalizeEmail } from './email.ts'
+export type {
+  AccountId,
+  RegisterResult,
+  SignInLookup,
+  SignInResult,
+  SignInSessionId,
+  VerificationMail,
+  VerifyEmailResult,
+} from './types.ts'
+
+/**
+ * Brand a raw string as an {@link AccountId}.
+ * @param value - opaque Account id.
+ * @returns the branded id.
+ */
+export function accountId(value: string): AccountId {
+  return value as AccountId
+}
+
+/**
+ * Brand a raw string as a {@link SignInSessionId}.
+ * @param value - opaque Sign-in session id.
+ * @returns the branded id.
+ */
+export function signInSessionId(value: string): SignInSessionId {
+  return value as SignInSessionId
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    accounts: Accounts
+  }
+}
+
+/**
+ * Abstract Account service. Subclass, implement the methods, and load the
+ * subclass as a plugin — it registers as `ctx.accounts`.
+ */
+export abstract class Accounts extends Service {
+  constructor(ctx: Context) {
+    super(ctx, 'accounts')
+  }
+
+  /**
+   * Create an Unverified Account and send a verification message.
+   * @param email - visitor-supplied email.
+   * @param password - visitor-supplied Password.
+   * @returns whether registration created the Account.
+   */
+  abstract register(email: string, password: string): Promise<RegisterResult>
+
+  /**
+   * Consume a single-use verification token from the mailbox link.
+   * @param token - raw token from the verification URL.
+   * @returns whether the Account is now verified.
+   */
+  abstract verifyEmail(token: string): Promise<VerifyEmailResult>
+
+  /**
+   * Send a fresh verification message when the email belongs to an Unverified
+   * Account. Unknown or already-verified addresses are a silent success so the
+   * call cannot enumerate Accounts.
+   * @param email - visitor-supplied email.
+   */
+  abstract resendVerification(email: string): Promise<void>
+
+  /**
+   * Create a Sign-in session after a verified Account presents the Password.
+   * Unknown emails and wrong Passwords share one failure so the call cannot
+   * enumerate Accounts. An Unverified Account with the correct Password is a
+   * distinct failure.
+   * @param email - visitor-supplied email.
+   * @param password - visitor-supplied Password.
+   * @returns a Sign-in session id on success.
+   */
+  abstract signIn(email: string, password: string): Promise<SignInResult>
+
+  /**
+   * End one Sign-in session. Unknown ids are a no-op.
+   * @param signInId - the id the browser presented.
+   */
+  abstract signOut(signInId: SignInSessionId): Promise<void>
+
+  /**
+   * Resolve a presented Sign-in session id to the owning Account.
+   * @param signInId - the id the browser presented.
+   * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
+   */
+  abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>
+}
+
+export default Accounts
