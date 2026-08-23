@@ -1240,32 +1240,38 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return Date.parse(`${day}T00:00:00.000Z`) + 86_400_000
   }
 
+  async function endExecutingInterval(bind: ExecutingBind): Promise<void> {
+    const startedAt = bind.intervalStartedAt
+    if (startedAt === undefined) return
+    await ctx.get('accounts')?.endExecutingWorld(bind.account, startedAt, Date.now())
+  }
+
   async function stopExecutingWorld(
     bind: ExecutingBind,
     opts?: { skipIf?: () => boolean },
   ): Promise<void> {
     const e2b = ctx.get('e2b')
-    const accounts = ctx.get('accounts')
-    const startedAt = bind.intervalStartedAt
-    const endInterval = async (): Promise<void> => {
-      if (startedAt === undefined || accounts === undefined) return
-      await accounts.endExecutingWorld(bind.account, startedAt, Date.now())
-    }
     /* v8 ignore next 3 -- Executing Session start already required e2b. */
     if (e2b === undefined) {
-      await endInterval()
+      await endExecutingInterval(bind)
+      return
+    }
+    if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+      await endExecutingInterval(bind)
       return
     }
     let endedOnChain = false
     await e2b.stopExecutingSession(bind.account, bind.rootId, {
-      ...opts?.skipIf === undefined ? {} : { skipIf: opts.skipIf },
+      skipIf: () =>
+        opts?.skipIf?.() === true
+        || e2b.executingSandbox(bind.account) !== bind.sandbox,
       onStopped: async () => {
         endedOnChain = true
-        await endInterval()
+        await endExecutingInterval(bind)
       },
     })
     if (e2b.executingSandbox(bind.account) === bind.sandbox) return
-    if (!endedOnChain) await endInterval()
+    if (!endedOnChain) await endExecutingInterval(bind)
   }
 
   /**
@@ -1370,7 +1376,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           await whenFamilyIdle(bind.rootId)
           if (familyBusy(bind.rootId)) continue
           if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
-            await stopExecutingWorld(bind)
+            await endExecutingInterval(bind)
             return
           }
           try {
@@ -1395,7 +1401,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           if (familyBusy(bind.rootId)) continue
           if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
-            await stopExecutingWorld(bind)
+            await endExecutingInterval(bind)
             return
           }
           await stopExecutingWorld(bind, {

@@ -97,6 +97,7 @@ function createRemoteWorld(): {
 let root: string | undefined
 let context: Context | undefined
 const idleGates = new Map<string, PromiseWithResolvers<undefined>>()
+const idleSettled = new Set<string>()
 const mailbox: MailMessage[] = []
 let currentWorld: ReturnType<typeof createRemoteWorld> | undefined
 
@@ -114,6 +115,7 @@ afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
   idleGates.clear()
+  idleSettled.clear()
   mailbox.length = 0
   currentWorld = undefined
 })
@@ -268,8 +270,17 @@ class IsolatedApiProxy extends Service {
         const agentCtx = ownerCtx.extend({ agent })
         const idle = Promise.withResolvers<undefined>()
         idleGates.set(session.id, idle)
+        void idle.promise.then(() => { idleSettled.add(session.id) })
         const live = {
           status: 'idle' as 'idle' | 'running',
+        }
+        const beginTurn = (): void => {
+          live.status = 'running'
+          if (!idleSettled.has(session.id)) return
+          idleSettled.delete(session.id)
+          const next = Promise.withResolvers<undefined>()
+          idleGates.set(session.id, next)
+          void next.promise.then(() => { idleSettled.add(session.id) })
         }
         Object.assign(agent, {
           id: session.id,
@@ -277,9 +288,12 @@ class IsolatedApiProxy extends Service {
           ctx: agentCtx,
           inbox: { nextTurn: [], nextStep: [] },
           cancel: () => undefined,
-          followup: () => { live.status = 'running' },
-          steer: () => { live.status = 'running' },
-          whenIdle: () => idle.promise.then(() => { live.status = 'idle' }),
+          followup: beginTurn,
+          steer: beginTurn,
+          whenIdle: () => {
+            const gate = idleGates.get(session.id)
+            return (gate?.promise ?? Promise.resolve()).then(() => { live.status = 'idle' })
+          },
         })
         Object.defineProperty(agent, 'status', {
           get: () => live.status,
@@ -669,13 +683,18 @@ describe('E2B Executing Session over HTTP', () => {
     const hydrated = currentWorld?.remote.get('/home/user/workspace/out.txt')
     expect(hydrated).toBeDefined()
     expect(Buffer.from(hydrated?.data ?? new Uint8Array()).toString()).toBe('new')
-    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
+    await expect.poll(() => e2b.hasLiveSlot() && currentWorld?.killed === false).toBe(true)
     const history = await rpc(harness, jar, 'session.history', { sessionId })
     const events = (history.body as {
       result?: { value?: { events?: Array<{ event?: { type?: string } }> } }
     }).result?.value?.events ?? []
     expect(events.some(entry => entry.event?.type === 'workspace/copy-back-failed')).toBe(false)
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
     if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+    await expect.poll(() => currentWorld?.killed === true || !e2b.hasLiveSlot()).toBe(true)
   })
 
   it('refuses a new Executing Session after 60 minutes and still allows sign-in, history, and Credentials', {
