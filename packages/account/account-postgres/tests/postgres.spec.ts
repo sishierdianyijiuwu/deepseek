@@ -223,6 +223,40 @@ describe('postgres accounts', () => {
     await ctx.fiber.dispose()
   })
 
+  it('deletes the Account row so the email can register again and leaves others', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+    }).await()
+    const accounts = ctx.accounts
+    await accounts.register('keep@example.com', 'password12')
+    const keepToken = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(keepToken).toBeDefined()
+    await accounts.verifyEmail(keepToken!)
+    await accounts.register('gone@example.com', 'password12')
+    const goneToken = /token=([0-9a-f]+)/.exec(mailbox.at(-1)?.text ?? '')?.[1]
+    expect(goneToken).toBeDefined()
+    await accounts.verifyEmail(goneToken!)
+    const signedIn = await accounts.signIn('gone@example.com', 'password12')
+    expect(signedIn.ok).toBe(true)
+    if (!signedIn.ok) return
+    const gone = await accounts.lookupByEmail('gone@example.com')
+    expect(gone).toBeDefined()
+    await expect(accounts.deleteAccount(gone!.accountId)).resolves.toEqual({ ok: true })
+    await expect(accounts.lookupSignIn(signedIn.signInId)).resolves.toBeUndefined()
+    await expect(accounts.lookupByEmail('gone@example.com')).resolves.toBeUndefined()
+    await expect(accounts.deleteAccount(gone!.accountId)).resolves.toEqual({ ok: false, error: 'not_found' })
+    await expect(accounts.register('gone@example.com', 'password12')).resolves.toEqual({ ok: true })
+    expect(await accounts.lookupByEmail('keep@example.com')).toMatchObject({
+      email: 'keep@example.com',
+      verified: true,
+    })
+    await ctx.fiber.dispose()
+  })
+
   it('rethrows a register failure that is not a unique violation', { timeout: 30_000 }, async () => {
     mailbox.length = 0
     const ctx = new Context()

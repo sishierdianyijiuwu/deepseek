@@ -18,6 +18,7 @@ import {
   type AccountId,
   type AccountLookup,
   type BanResult,
+  type DeleteResult,
   type OperatorAuditRecord,
   type OperatorAuditWrite,
   type RegisterResult,
@@ -308,7 +309,7 @@ export class PostgresAccounts extends Accounts {
         [found.id],
       )
       const row = locked.rows[0] as Pick<AccountRow, 'verified_at' | 'banned_at'> | undefined
-      /* v8 ignore next -- Deletion is a later ticket; this id was just read from accounts. */
+      /* v8 ignore next -- concurrent Deletion can drop the row between the hash read and this lock. */
       if (row === undefined) return { ok: false, error: 'invalid_credentials' }
       if (row.verified_at == null) return { ok: false, error: 'unverified' }
       if (row.banned_at != null) return { ok: false, error: 'banned' }
@@ -482,6 +483,20 @@ export class PostgresAccounts extends Accounts {
       )
       return { ok: true }
     })
+  }
+
+  /**
+   * Erase the Account row. Child token and Sign-in session rows CASCADE.
+   * @param id - opaque Account id.
+   * @returns `{ ok: true }` when the row was deleted, or `not_found`.
+   */
+  override async deleteAccount(id: AccountId): Promise<DeleteResult> {
+    const found = await this.client().query(
+      'DELETE FROM accounts WHERE id = $1 RETURNING id',
+      [id],
+    )
+    if (found.rows[0] === undefined) return { ok: false, error: 'not_found' }
+    return { ok: true }
   }
 
   /**

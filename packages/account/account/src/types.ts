@@ -31,6 +31,11 @@ export type BanResult =
   | { ok: true }
   | { ok: false; error: 'invalid_email' | 'not_found' }
 
+/** Outcome of {@link import('./index.ts').Accounts.deleteAccount}. */
+export type DeleteResult =
+  | { ok: true }
+  | { ok: false; error: 'not_found' }
+
 /** Outcome of {@link import('./index.ts').Accounts.resetPassword}. */
 export type ResetPasswordResult =
   | { ok: true }

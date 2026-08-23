@@ -1,6 +1,7 @@
 # The dsh-hosted bundle patch: Account, mailer, auth HTTP, Account-scoped
-# Credentials, cloud Workspaces, and the register / sign-in / password-reset
-# UI over dsh-base + dsh-web-app. Local `dsh web` does not apply this layer.
+# Credentials, cloud Workspaces, and the register / sign-in / password-reset /
+# Deletion UI over dsh-base + dsh-web-app. Local `dsh web` does not apply this
+# layer.
 # Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST /
 # DSH_SMTP_FROM / DSH_WORKSPACE_ROOT fail loud at load.
 
@@ -37,6 +38,7 @@
       name: '@deepseek-ai/dsh-account-http'
       config:
         cookieSecure: !!js process.env.DSH_COOKIE_SECURE === '1'
+        requireOwnedErase: true
 
     - id: ui-account
       name: '@deepseek-ai/dsh-client-ui-account'

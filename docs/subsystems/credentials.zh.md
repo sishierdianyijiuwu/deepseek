@@ -219,6 +219,14 @@ abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | 
  * @param key - the record to remove.
  */
 abstract deleteRecord(key: CredentialKey): Promise<void>
+
+/**
+ * Erase every stored secret for one Account. Hosted Account-scoped providers
+ * delete that Account's document; process-env and file providers no-op.
+ * Unknown ids are a no-op. Does not require a bound Sign-in Account.
+ * @param _accountId - Account whose stored secrets should disappear.
+ */
+eraseOwned(_accountId: string): Promise<void>
 ```
 
 Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)

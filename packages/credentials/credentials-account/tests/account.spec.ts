@@ -14,6 +14,7 @@ import {
   runWithAccount,
   type AccountLookup,
   type BanResult,
+  type DeleteResult,
   type OperatorAuditRecord,
   type OperatorAuditWrite,
   type RegisterResult,
@@ -60,6 +61,9 @@ class FakeAccounts extends Accounts {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override deleteAccount(): Promise<DeleteResult> {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override setRegistrationFrozen(): Promise<void> {
@@ -138,6 +142,19 @@ describe('Account-scoped credentials', () => {
       if (previous === undefined) delete process.env['DEEPSEEK_API_KEY']
       else process.env['DEEPSEEK_API_KEY'] = previous
     }
+  })
+
+  it('eraseOwned deletes one Account document and leaves others', async () => {
+    const dir = await tempDir()
+    const ctx = await boot(dir)
+    await runWithAccount(accountA, () => ctx.credentials.set(KEY, 'secret-a'))
+    await runWithAccount(accountB, () => ctx.credentials.set(KEY, 'secret-b'))
+    await ctx.credentials.eraseOwned(accountA)
+    expect(await runWithAccount(accountA, () => ctx.credentials.resolve(KEY))).toBeUndefined()
+    expect(await runWithAccount(accountB, () => ctx.credentials.resolve(KEY)))
+      .toEqual({ value: 'secret-b', source: ACCOUNT_SOURCE })
+    await ctx.credentials.eraseOwned(accountA)
+    await ctx.credentials.eraseOwned('../escape')
   })
 
   it('applies a write to the next resolve without a restart', async () => {

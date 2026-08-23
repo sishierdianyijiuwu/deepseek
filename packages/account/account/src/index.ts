@@ -10,6 +10,7 @@ import type {
   AccountId,
   AccountLookup,
   BanResult,
+  DeleteResult,
   OperatorAuditRecord,
   OperatorAuditWrite,
   RegisterResult,
@@ -37,6 +38,7 @@ export type {
   AccountId,
   AccountLookup,
   BanResult,
+  DeleteResult,
   OperatorAccess,
   OperatorAuditRecord,
   OperatorAuditWrite,
@@ -170,6 +172,15 @@ export abstract class Accounts extends Service {
    * @returns `{ ok: true }` when the Account exists, or `not_found`.
    */
   abstract liftBan(email: string): Promise<BanResult>
+
+  /**
+   * Erase this Account row and CASCADE Sign-in sessions, verification tokens,
+   * and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions,
+   * Workspaces, and Credentials before calling this. Unknown ids are `not_found`.
+   * @param id - opaque Account id of the signed-in caller.
+   * @returns `{ ok: true }` when the row was deleted, or `not_found`.
+   */
+  abstract deleteAccount(id: AccountId): Promise<DeleteResult>
 
   /**
    * Freeze or unfreeze public registration. Frozen `register` returns

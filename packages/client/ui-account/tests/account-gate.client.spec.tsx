@@ -16,6 +16,7 @@ function setup(overrides: Partial<AccountGateProps> = {}) {
     register: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     signIn: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     signOut: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
+    deleteAccount: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     resend: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     requestPasswordReset: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
     resetPassword: vi.fn(async (): Promise<AuthResult> => ({ ok: true })),
@@ -56,6 +57,23 @@ describe('AccountGate', () => {
     expect(screen.getByText('已登录 a@b.c')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '退出登录' }))
     await waitFor(() => { expect(props.signOut).toHaveBeenCalled() })
+    expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy()
+  })
+
+  it('confirms Deletion from the signed-in chip and returns to sign-in', async () => {
+    const { props } = setup({
+      me: vi.fn(async (): Promise<MeResult> => ({
+        ok: true, signedIn: true, email: 'me@example.com', operator: false,
+      })),
+    })
+    await waitFor(() => { expect(screen.getByText('已登录 me@example.com')).toBeTruthy() })
+    fireEvent.click(screen.getByRole('button', { name: '删除 Account' }))
+    expect(screen.getByText('将永久删除此 Account 及其 Session、Workspace 和 Credential。无法撤销。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(props.deleteAccount).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '删除 Account' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
+    await waitFor(() => { expect(props.deleteAccount).toHaveBeenCalled() })
     expect(screen.getByRole('heading', { name: '登录' })).toBeTruthy()
   })
 

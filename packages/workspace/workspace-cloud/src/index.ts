@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -311,6 +311,29 @@ export class CloudWorkspaces extends Service {
       await rm(path, { recursive: true, force: true })
       return true
     })
+  }
+
+  /**
+   * Delete every Workspace this Account owns, then remove the Account prefix
+   * directory. A planted symlink at that prefix is unlinked rather than followed.
+   * @param accountId - owning Account.
+   */
+  async deleteAllOwned(accountId: AccountId): Promise<void> {
+    for (const workspace of this.listOwned(accountId)) {
+      await this.deleteOwned(accountId, workspace.id)
+    }
+    const accountRoot = join(this.root, accountId)
+    try {
+      const st = await lstat(accountRoot)
+      if (st.isSymbolicLink()) {
+        await unlink(accountRoot)
+        return
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    await rm(accountRoot, { recursive: true, force: true })
   }
 
   /**

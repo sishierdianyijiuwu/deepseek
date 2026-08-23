@@ -23,15 +23,15 @@ type Screen =
   | 'signed-in'
 
 /**
- * Register / sign-in / password-reset / sign-out overlay. Occupies the whole
- * viewport until a Sign-in session exists, then a small signed-in chip.
+ * Register / sign-in / password-reset / sign-out / Deletion overlay. Occupies
+ * the whole viewport until a Sign-in session exists, then a small signed-in chip.
  * @param props - overlay runtime share, auth callbacks, and locale seat.
  * @returns the gate UI.
  */
 export function AccountGate(props: AccountGateProps): ReactNode {
   const {
-    me, register, signIn, signOut, resend, requestPasswordReset, resetPassword,
-    getSearch, replaceSearch, t,
+    me, register, signIn, signOut, deleteAccount, resend, requestPasswordReset,
+    resetPassword, getSearch, replaceSearch, t,
   } = props
   const [screen, setScreen] = useState<Screen>('loading')
   const [email, setEmail] = useState('')
@@ -41,6 +41,7 @@ export function AccountGate(props: AccountGateProps): ReactNode {
   const [error, setError] = useState<{ code: string; message: string } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [signedInEmail, setSignedInEmail] = useState('')
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -162,6 +163,17 @@ export function AccountGate(props: AccountGateProps): ReactNode {
       setSignedInEmail('')
       setPassword('')
       setNotice(null)
+      setConfirmingDelete(false)
+      setScreen('sign-in')
+    })
+  }
+
+  const onDelete = (): void => {
+    run(() => deleteAccount(), () => {
+      setSignedInEmail('')
+      setPassword('')
+      setNotice(null)
+      setConfirmingDelete(false)
       setScreen('sign-in')
     })
   }
@@ -169,11 +181,37 @@ export function AccountGate(props: AccountGateProps): ReactNode {
   if (screen === 'loading') return null
 
   if (screen === 'signed-in') {
+    if (confirmingDelete) {
+      return (
+        <div className={css.chip}>
+          <span>{t('delete.confirm')}</span>
+          <Button variant="primary" size="sm" disabled={busy} onClick={onDelete}>
+            {busy ? t('busy') : t('delete.yes')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => { setConfirmingDelete(false) }}
+          >
+            {t('delete.cancel')}
+          </Button>
+        </div>
+      )
+    }
     return (
       <div className={css.chip}>
         <span>{t('signedIn.as', { email: signedInEmail })}</span>
         <Button variant="outline" size="sm" disabled={busy} onClick={onSignOut}>
           {t('signOut')}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => { setConfirmingDelete(true) }}
+        >
+          {t('deleteAccount')}
         </Button>
       </div>
     )

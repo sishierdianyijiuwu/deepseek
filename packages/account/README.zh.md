@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-托管 Account 身份：用邮箱和密码注册、验证邮箱、登录，并可重置 Password。Operator（配置的邮箱列表）可以 Ban 某个 Account，并冻结公开注册。本组不复用 [`identity/`](../identity/README.zh.md)（匿名遥测）或 [`credentials/`](../credentials/README.zh.md)（模型提供方密钥）。
+托管 Account 身份：用邮箱和密码注册、验证邮箱、登录，并可重置 Password 或删除 Account。Operator（配置的邮箱列表）可以 Ban 某个 Account，并冻结公开注册。本组不复用 [`identity/`](../identity/README.zh.md)（匿名遥测）或 [`credentials/`](../credentials/README.zh.md)（模型提供方密钥）。
 
 | 包 | 职责 | ctx key |
 |---|---|---|

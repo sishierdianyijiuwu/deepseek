@@ -276,6 +276,16 @@ export abstract class CredentialProvider extends Service {
   abstract deleteRecord(key: CredentialKey): Promise<void>
 
   /**
+   * Erase every stored secret for one Account. Hosted Account-scoped providers
+   * delete that Account's document; process-env and file providers no-op.
+   * Unknown ids are a no-op. Does not require a bound Sign-in Account.
+   * @param _accountId - Account whose stored secrets should disappear.
+   */
+  eraseOwned(_accountId: string): Promise<void> {
+    return Promise.resolve()
+  }
+
+  /**
    * Fan `credentials/reference-updated` out with contained listener failures: every
    * listener runs, and a sync throw or async rejection is logged without
    * changing the committed operation's outcome — except `INVARIANT`-coded

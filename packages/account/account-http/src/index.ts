@@ -7,10 +7,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SIGN_IN_COOKIE, cookieValue, signInSessionId } from '@deepseek-ai/dsh-account'
-import type { Accounts, SignInLookup } from '@deepseek-ai/dsh-account'
+import type { AccountId, Accounts, SignInLookup } from '@deepseek-ai/dsh-account'
 
 export { SIGN_IN_COOKIE, cookieValue }
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace-cloud'
 
 /** Maximum JSON body accepted on auth POST routes. */
 export const MAX_AUTH_BODY_BYTES = 64 * 1024
@@ -19,10 +22,17 @@ export const MAX_AUTH_BODY_BYTES = 64 * 1024
 export interface Config {
   /** Set the cookie Secure flag (HTTPS reverse-proxy deployments). */
   cookieSecure?: boolean
+  /**
+   * When true, Deletion fails unless `cloudWorkspaces`, `credentials`, and
+   * `sessionPersistence` are composed. The hosted patch sets this; auth-only
+   * tests leave it false so a row-only composition still deletes the Account.
+   */
+  requireOwnedErase?: boolean
 }
 
 export const Config: z<Config> = z.object({
   cookieSecure: z.boolean().default(false),
+  requireOwnedErase: z.boolean().default(false),
 })
 
 /** Stable Cordis plugin name. */
@@ -38,16 +48,16 @@ export const inject = ['webServer', 'accounts']
  */
 export function apply(ctx: Context, config: Config): void {
   const secure = config.cookieSecure === true
-  const accounts = ctx.accounts
+  const requireOwnedErase = config.requireOwnedErase === true
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/auth',
-    handler: (req, res) => handleAuth(req, res, accounts, secure),
+    handler: (req, res) => handleAuth(req, res, ctx, secure, requireOwnedErase),
   }), 'account-http: /auth')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/verify',
-    handler: (req, res) => handleVerify(req, res, accounts),
+    handler: (req, res) => handleVerify(req, res, ctx.accounts),
   }), 'account-http: /verify')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -60,15 +70,18 @@ export function apply(ctx: Context, config: Config): void {
  * Dispatch `/auth/*` by pathname and method.
  * @param req - incoming request.
  * @param res - response to write.
- * @param accounts - Account service.
+ * @param ctx - Cordis context with `accounts` and optional owned-data services.
  * @param cookieSecure - cookie Secure flag.
+ * @param requireOwnedErase - fail Deletion when a hosted follow-up service is missing.
  */
 export async function handleAuth(
   req: IncomingMessage,
   res: ServerResponse,
-  accounts: Accounts,
+  ctx: Context,
   cookieSecure: boolean,
+  requireOwnedErase = false,
 ): Promise<void> {
+  const accounts = ctx.accounts
   /* v8 ignore next -- node:http always sets url/method on server requests */
   const url = new URL(req.url ?? '/', 'http://dsh.internal')
   /* v8 ignore next -- node:http always sets method on server requests */
@@ -172,6 +185,28 @@ export async function handleAuth(
     const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
     if (id !== undefined) await accounts.signOut(signInSessionId(id))
     res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, '', 0, cookieSecure))
+    writeJson(res, 200, { ok: true })
+    return
+  }
+  if (url.pathname === '/auth/delete') {
+    const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
+    if (id === undefined) {
+      writeJson(res, 200, failure('forbidden', 'Not allowed'))
+      return
+    }
+    const session = await accounts.lookupSignIn(signInSessionId(id))
+    if (session === undefined) {
+      writeJson(res, 200, failure('forbidden', 'Not allowed'))
+      return
+    }
+    try {
+      await eraseOwnedData(ctx, session.accountId, requireOwnedErase)
+      await accounts.deleteAccount(session.accountId)
+    } finally {
+      if (!res.headersSent) {
+        res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, '', 0, cookieSecure))
+      }
+    }
     writeJson(res, 200, { ok: true })
     return
   }
@@ -349,6 +384,56 @@ async function requireOperator(
   const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
   res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, id, maxAge, cookieSecure))
   return session
+}
+
+/**
+ * Erase Workspaces, Credentials, and Session logs the Account owns, then the
+ * caller deletes the Account row. Each composed service runs even if another
+ * throws; failures are collected and rethrown so a retry can finish.
+ * @param ctx - Cordis context that may carry those services.
+ * @param accountId - Account whose owned data is erased.
+ * @param requireOwnedErase - throw when a hosted follow-up service is missing.
+ */
+async function eraseOwnedData(
+  ctx: Context,
+  accountId: AccountId,
+  requireOwnedErase: boolean,
+): Promise<void> {
+  const cloud = ctx.get('cloudWorkspaces')
+  const credentials = ctx.get('credentials')
+  const persistence = ctx.get('sessionPersistence')
+  if (requireOwnedErase
+    && (cloud === undefined || credentials === undefined || persistence === undefined)) {
+    throw new Error(
+      'account-http: Deletion requires cloudWorkspaces, credentials, and sessionPersistence',
+    )
+  }
+  const errors: unknown[] = []
+  if (cloud !== undefined) {
+    try {
+      await cloud.deleteAllOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (credentials !== undefined) {
+    try {
+      await credentials.eraseOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (persistence !== undefined) {
+    try {
+      await persistence.deleteOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'account-http: owned-data erase failed')
+  }
 }
 
 async function handleOperatorBan(
