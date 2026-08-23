@@ -145,6 +145,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/account/mailer-smtp': { kind: 'none', reason: 'SMTP delivery never enters a model request.' },
   'packages/client/ui-account': { kind: 'none', reason: 'Browser-side Account gate; registers nothing model-facing.' },
   'packages/bundle/hosted': { kind: 'indirect', reason: 'The bundle is a patch-list carrier; each inserted row\'s package owns its model-facing behavior.' },
+  'packages/workspace/workspace-cloud': { kind: 'none', reason: 'Cloud Workspace metadata and control-plane files never enter a model request.' },
   'packages/skill/skill': { kind: 'indirect', reason: 'The provider registry delegates model rendering to dsh-tool-skill.' },
   'packages/skill/skill-badge': { kind: 'indirect', reason: 'The bundled provider delegates model rendering to dsh-tool-skill.' },
   'packages/skill/skill-filesystem': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-skill.' },

@@ -93,6 +93,9 @@
       "path": "../../workspace/workspace"
     },
     {
+      "path": "../../workspace/workspace-cloud"
+    },
+    {
       "path": "../directory-picker"
     },
     {

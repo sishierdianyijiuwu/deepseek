@@ -30,8 +30,8 @@ function hook<T>(snapshot: T) {
 const sessions: SessionListState = {
   ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
 }
-const workspaceState = (items: readonly WorkspaceView[]): WorkspaceListState => ({
-  items, archivedSessionIds: [], state: 'idle', phase: 'ready', error: null, baselinesReady: true,
+const workspaceState = (items: readonly WorkspaceView[], emptyCreate = false): WorkspaceListState => ({
+  items, archivedSessionIds: [], emptyCreate, state: 'idle', phase: 'ready', error: null, baselinesReady: true,
   recentWorkspaceId: items[0]?.workspaceId,
 })
 function anchor(): { current: HTMLElement } {
@@ -81,6 +81,7 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
+  emptyCreate = false,
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
@@ -91,7 +92,7 @@ function mount(
       open
       anchorRef={anchorRef}
       useSessions={hook(sessions)}
-      useWorkspaces={hook(workspaceState(nextItems))}
+      useWorkspaces={hook(workspaceState(nextItems, emptyCreate))}
       onPick={onPick}
       onClose={onClose}
       createWorkspace={createWorkspace}
@@ -135,6 +136,16 @@ describe('WorkspacePicker', () => {
     await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
     // Successful adoption withdraws the flow request.
     expect(screen.queryByTestId('directory-flow')).toBeNull()
+  })
+
+  it('creates an empty cloud Workspace without opening the directory flow', async () => {
+    const created = workspace('cloud', 'Workspace')
+    const createWorkspace = vi.fn(async () => created)
+    const b = mount([workspace('alpha', 'Alpha')], createWorkspace, occupancySource(false), true)
+    chooseAdd()
+    expect(createWorkspace).toHaveBeenCalledWith({})
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
   })
 
   it('raises the flow straight from the anchor gesture when adding is the only entry', () => {

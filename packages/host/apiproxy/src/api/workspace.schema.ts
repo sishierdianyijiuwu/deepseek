@@ -29,11 +29,13 @@ export const workspaceListRequestSchema = z.object({}) satisfies z.ZodType<Wire<
 export const workspaceListValueSchema = z.object({
   items: z.array(workspaceViewSchema),
   archivedSessionIds: z.array(sessionIdSchema),
+  emptyCreate: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.list'>>>
 
-/** workspace.create request payload: the existing directory to adopt. */
+/** workspace.create request payload: local path adoption or cloud empty create. */
 export const workspaceCreateRequestSchema = z.object({
-  path: z.string(),
+  path: z.string().optional(),
+  title: z.string().optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'workspace.create'>>>
 
 /** workspace.create response value. */
@@ -98,3 +100,15 @@ export const workspaceArchiveSessionRequestSchema = z.object({
 export const workspaceArchiveSessionValueSchema = z.object({
   archivedSessionIds: z.array(sessionIdSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.archiveSession'>>>
+
+/** workspace.write request payload: a utf8 file inside a cloud Workspace. */
+export const workspaceWriteRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  path: z.string().min(1),
+  data: z.string(),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.write'>>>
+
+/** workspace.write response value. */
+export const workspaceWriteValueSchema = z.object({
+  written: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.write'>>>

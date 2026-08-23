@@ -42,7 +42,8 @@
     "@deepseek-ai/dsh-account-http": "workspace:^",
     "@deepseek-ai/dsh-account-postgres": "workspace:^",
     "@deepseek-ai/dsh-client-ui-account": "workspace:^",
-    "@deepseek-ai/dsh-mailer-smtp": "workspace:^"
+    "@deepseek-ai/dsh-mailer-smtp": "workspace:^",
+    "@deepseek-ai/dsh-workspace-cloud": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",

@@ -1,7 +1,8 @@
-# The dsh-hosted bundle patch: Account, mailer, auth HTTP, and the register /
-# sign-in / password-reset UI over dsh-base + dsh-web-app. Local `dsh web` does
-# not apply this layer. Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL /
-# DSH_SMTP_HOST / DSH_SMTP_FROM fail loud at load.
+# The dsh-hosted bundle patch: Account, mailer, auth HTTP, cloud Workspaces,
+# and the register / sign-in / password-reset UI over dsh-base + dsh-web-app.
+# Local `dsh web` does not apply this layer. Missing DSH_POSTGRES_URL /
+# DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST / DSH_SMTP_FROM / DSH_WORKSPACE_ROOT
+# fail loud at load.
 
 - insert:
     - id: mailer
@@ -19,6 +20,12 @@
       config:
         url: !!js process.env.DSH_POSTGRES_URL
         publicBaseUrl: !!js process.env.DSH_PUBLIC_BASE_URL
+
+    - id: cloud-workspaces
+      name: '@deepseek-ai/dsh-workspace-cloud'
+      config:
+        url: !!js process.env.DSH_POSTGRES_URL
+        root: !!js process.env.DSH_WORKSPACE_ROOT
 
     - id: account-http
       name: '@deepseek-ai/dsh-account-http'

@@ -1,0 +1,24 @@
+# @deepseek-ai/dsh-workspace-cloud
+
+[English](README.md) | 中文
+
+托管控制面的云 Workspace（`ctx.cloudWorkspaces`）：Account 在控制面文件系统上创建空目录，路径按 `{root}/{accountId}/{dir}/` 命名。元数据（id、Account、标题、路径、槽位）存在 PostgreSQL 中，而不是文件 blob。上限为每个 Account 三个 Workspace、每个 1 GiB 常规文件字节（ADR 0009、ADR 0017）。
+
+配置 `url` 为 `postgres://` / `postgresql://` 连接串，或测试用的 `pglite:`。`root` 是存放这些目录树的控制面目录。缺少 `url` 或 `root`、连接失败、或 schema 版本不是 `SCHEMA_VERSION`（1）会在加载时失败。该插件注入 `workspaceRegistry`，因此新建目录同时也是 Host Workspace，Session 挂载路径无需另走一套。
+
+`createEmpty` 分配槽位 0..2；第四次创建抛出 `CloudWorkspaceLimitError`。`writeFile` 遍历目录树，并拒绝会使总量超过 1 GiB 的写入（`CloudWorkspaceQuotaError`）。`owns` / `listOwned` / `getOwned` / `deleteOwned` 是 Host `/api` 使用的 Account 隔离检查。另一个 Account 的 id 表现为找不到，而不是单独的禁止错误。
+
+git Import 与 E2B 回拷是后续工单；它们必须调用 `writeFile`（或使用同一上限的等价树写入），而不是直接改写持久副本。
+
+## Model Experience
+
+None, as cloud Workspace metadata and control-plane files never enter a model request.
+
+#### KV Cache effect
+
+None; this package neither assembles nor sends a provider request.
+
+## Known Limitations and Deferred Work
+
+- **没有 git Import** — 把公开仓库克隆进新槽位是后续工单。
+- **没有 E2B hydrate / 回拷** — 执行世界同步是后续工单；今日在 `writeFile` 上执行 1 GiB 上限。

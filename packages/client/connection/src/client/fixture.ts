@@ -2663,14 +2663,17 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         archivedSessionIds: [...archivedSessionIds],
       }),
       create: (request) => {
-        const { path } = request.payload
+        const path = request.payload.path ?? `/cloud/ws-${String(nextWorkspace)}`
         const existing = workspaces.find(w => w.path === path)
         if (existing !== undefined) return ok(request, { workspace: { ...existing }, created: false })
         const now = new Date().toISOString()
+        const title = request.payload.title?.trim()
+          || path.split('/').filter(Boolean).at(-1)
+          || path
         const created: WorkspaceView = {
           workspaceId: wid(`fx-ws-${nextWorkspace++}`),
           path,
-          title: path.split('/').filter(Boolean).at(-1) ?? path,
+          title,
           sessionIds: [],
           createdAt: now,
           updatedAt: now,
@@ -2788,6 +2791,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         }
         return ok(request, { archivedSessionIds: [...archivedSessionIds] })
       },
+      write: request => ok(request, { written: true as const }),
     },
     agentPresets: {
       // Both trusts appear, because a surface must present a locally authored
@@ -3203,6 +3207,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
+      case 'workspace.write': return this.api.workspace.write(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

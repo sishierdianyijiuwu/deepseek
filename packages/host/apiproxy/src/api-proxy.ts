@@ -30,6 +30,15 @@ import {
   workspaceDomainState, workspaceRecord, WorkspaceId as brandWorkspaceId,
   WorkspaceMoveInvalidError, WorkspaceOrderInvalidError, WorkspaceUnknownSessionError,
 } from '@deepseek-ai/dsh-workspace'
+import type {} from '@deepseek-ai/dsh-workspace-cloud'
+import {
+  CloudWorkspaceLimitError,
+  CloudWorkspaceNotFoundError,
+  CloudWorkspacePathError,
+  CloudWorkspaceQuotaError,
+  MAX_WORKSPACE_BYTES,
+  MAX_WORKSPACES_PER_ACCOUNT,
+} from '@deepseek-ai/dsh-workspace-cloud'
 // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
 import {
   InvalidPresetIdError, PresetExistsError, PresetMountError,
@@ -1026,6 +1035,22 @@ function workspaceView(workspace: Workspace): WorkspaceView {
   }
 }
 
+/**
+ * Registry Workspace visible to the current viewer. Cloud Workspaces hide
+ * another Account's ids as not found.
+ */
+function visibleWorkspace(ctx: Context, id: WorkspaceId): Workspace | undefined {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined) return undefined
+  const workspace = registry.get(id)
+  if (workspace === undefined) return undefined
+  const cloud = ctx.get('cloudWorkspaces')
+  if (cloud === undefined) return workspace
+  const viewer = currentAccountId()
+  if (viewer === undefined || !cloud.owns(viewer, workspace.id)) return undefined
+  return workspace
+}
+
 /** Wire projection of the durable record carried by `domain/changed`. */
 function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceView {
   const record: WorkspaceRecord = workspaceRecord.parse(value)
@@ -1080,6 +1105,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   function isolationActive(): boolean {
     return ctx.get('accounts') !== undefined
+  }
+
+  function workspaceRegistry() {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry === undefined) throw new Error('workspace registry is not composed')
+    return registry
   }
 
   function headerVisibleTo(header: SessionHeader, viewer: AccountId | undefined): boolean {
@@ -1531,7 +1562,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   /** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */
   async function forkWorkspace(source: Pick<Session, 'id' | 'header'>): Promise<Workspace | undefined> {
-    const workspaces = ctx.workspaceRegistry.list()
+    const cloud = ctx.get('cloudWorkspaces')
+    const viewer = currentAccountId()
+    const workspaces = cloud === undefined || viewer === undefined
+      ? workspaceRegistry().list()
+      : cloud.listOwned(viewer)
     const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.id))
     if (direct !== undefined || source.header.origin !== 'subagent') return direct
 
@@ -1743,9 +1778,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /** Resolve or create one path while holding the Host's workspace-create chain. */
   function ensureWorkspace(path: string): Promise<{ workspace: Workspace; created: boolean }> {
     const operation = workspaceCreationChain.then(async () => {
-      const existing = await ctx.workspaceRegistry.resolveByPath(path)
+      const existing = await workspaceRegistry().resolveByPath(path)
       if (existing !== undefined) return { workspace: existing, created: false }
-      return { workspace: await ctx.workspaceRegistry.create(path), created: true }
+      return { workspace: await workspaceRegistry().create(path), created: true }
     })
     workspaceCreationChain = operation.then(() => undefined, () => undefined)
     return operation
@@ -2174,8 +2209,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async create(request) {
         const sessionId = request.payload.sessionId ?? `session-${randomUUID()}` as SessionId
         let workspace: Workspace | undefined
+        if (ctx.get('cloudWorkspaces') !== undefined && request.payload.workspaceId === undefined) {
+          return err(request, {
+            code: 'workspace-required',
+            message: 'session.create requires a Workspace owned by this Account',
+            details: {},
+          })
+        }
         if (request.payload.workspaceId !== undefined) {
-          workspace = ctx.workspaceRegistry.get(brandWorkspaceId(request.payload.workspaceId))
+          workspace = visibleWorkspace(ctx, brandWorkspaceId(request.payload.workspaceId))
           if (workspace === undefined) {
             return err(request, {
               code: 'workspace-not-found',
@@ -2844,14 +2886,58 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     workspace: {
       list(request) {
+        const cloud = ctx.get('cloudWorkspaces')
+        const viewer = currentAccountId()
+        const items = cloud === undefined
+          ? workspaceRegistry().list()
+          : viewer === undefined ? [] : cloud.listOwned(viewer)
         return Promise.resolve(ok(request, {
-          items: ctx.workspaceRegistry.list().map(workspaceView),
-          archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds],
+          items: items.map(workspaceView),
+          archivedSessionIds: [...workspaceRegistry().archivedSessionIds],
+          emptyCreate: cloud !== undefined,
         }))
       },
 
       async create(request) {
-        const { path } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        const { path, title } = request.payload
+        if (cloud !== undefined) {
+          const account = currentAccountId()
+          if (account === undefined) {
+            return err(request, {
+              code: 'workspace-not-found',
+              message: 'workspace create requires a Sign-in session',
+              details: { workspaceId: '' },
+            })
+          }
+          if (path !== undefined && path !== '') {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: 'cloud Workspaces are created empty; a laptop path cannot be adopted',
+              details: { path },
+            })
+          }
+          try {
+            const workspace = await cloud.createEmpty(account, title)
+            return ok(request, { workspace: workspaceView(workspace), created: true })
+          } catch (error: unknown) {
+            if (error instanceof CloudWorkspaceLimitError) {
+              return err(request, {
+                code: 'workspace-limit',
+                message: error.message,
+                details: { max: MAX_WORKSPACES_PER_ACCOUNT },
+              })
+            }
+            throw error
+          }
+        }
+        if (path === undefined || path === '') {
+          return err(request, {
+            code: 'workspace-invalid-path',
+            message: 'workspace.create requires a path',
+            details: { path: path ?? '' },
+          })
+        }
         try {
           const { workspace, created } = await ensureWorkspace(path)
           return ok(request, { workspace: workspaceView(workspace), created })
@@ -2869,7 +2955,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async rename(request) {
         const { payload } = request
-        const workspace = ctx.workspaceRegistry.get(brandWorkspaceId(payload.workspaceId))
+        const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
         const title = payload.title.trim()
         // Uniqueness AND the same-title no-op both ride the create chain so
@@ -2878,7 +2964,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // still lands afterwards.
         const operation = workspaceCreationChain.then(async () => {
           if (title === workspace.title) return
-          if (ctx.workspaceRegistry.list().some(other => other.id !== workspace.id && other.title === title)) {
+          const cloud = ctx.get('cloudWorkspaces')
+          const viewer = currentAccountId()
+          const siblings = cloud === undefined
+            ? workspaceRegistry().list()
+            : viewer === undefined ? [] : cloud.listOwned(viewer)
+          if (siblings.some(other => other.id !== workspace.id && other.title === title)) {
             throw new WorkspaceNameConflictError(title)
           }
           await workspace.setTitle(title)
@@ -2901,8 +2992,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async delete(request) {
         const { workspaceId } = request.payload
-        const operation = workspaceCreationChain.then(() =>
-          ctx.workspaceRegistry.delete(brandWorkspaceId(workspaceId)))
+        const id = brandWorkspaceId(workspaceId)
+        if (visibleWorkspace(ctx, id) === undefined) return workspaceNotFound(request, workspaceId)
+        const cloud = ctx.get('cloudWorkspaces')
+        const operation = workspaceCreationChain.then(() => {
+          const account = currentAccountId()
+          if (cloud !== undefined && account !== undefined) return cloud.deleteOwned(account, id)
+          return workspaceRegistry().delete(id)
+        })
         workspaceCreationChain = operation.then(() => undefined, () => undefined)
         if (!await operation) return workspaceNotFound(request, workspaceId)
         return ok(request, { deleted: true as const })
@@ -2910,12 +3007,24 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async insertBefore(request) {
         const { workspaceId, beforeWorkspaceId } = request.payload
+        if (visibleWorkspace(ctx, brandWorkspaceId(workspaceId)) === undefined) {
+          return workspaceNotFound(request, workspaceId)
+        }
+        if (beforeWorkspaceId !== undefined
+          && visibleWorkspace(ctx, brandWorkspaceId(beforeWorkspaceId)) === undefined) {
+          return workspaceNotFound(request, beforeWorkspaceId)
+        }
         try {
-          const workspaceIds = await ctx.workspaceRegistry.insertBefore(
+          const workspaceIds = await workspaceRegistry().insertBefore(
             brandWorkspaceId(workspaceId),
             beforeWorkspaceId === undefined ? undefined : brandWorkspaceId(beforeWorkspaceId),
           )
-          return ok(request, { workspaceIds: [...workspaceIds] })
+          const cloud = ctx.get('cloudWorkspaces')
+          const viewer = currentAccountId()
+          const visible = cloud === undefined || viewer === undefined
+            ? workspaceIds
+            : workspaceIds.filter(id => cloud.owns(viewer, id))
+          return ok(request, { workspaceIds: [...visible] })
         } catch (error: unknown) {
           if (!(error instanceof WorkspaceOrderInvalidError)) throw error
           return workspaceNotFound(request, error.workspaceId)
@@ -2924,7 +3033,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async insertSessionBefore(request) {
         const { payload } = request
-        const workspace = ctx.workspaceRegistry.get(brandWorkspaceId(payload.workspaceId))
+        const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
         try {
           await workspace.insertSessionBefore(payload.sessionId, payload.beforeSessionId)
@@ -2948,7 +3057,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async archiveSession(request) {
         const { sessionId } = request.payload
         try {
-          await ctx.workspaceRegistry.archiveSession(sessionId)
+          await workspaceRegistry().archiveSession(sessionId)
         } catch (error: unknown) {
           // Only the registry's unknown-session rejection is the business
           // code; storage/durability failures propagate as internal errors.
@@ -2959,7 +3068,38 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId },
           })
         }
-        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+        return ok(request, { archivedSessionIds: [...workspaceRegistry().archivedSessionIds] })
+      },
+
+      async write(request) {
+        const cloud = ctx.get('cloudWorkspaces')
+        const { workspaceId, path, data } = request.payload
+        if (cloud === undefined) return workspaceNotFound(request, workspaceId)
+        const account = currentAccountId()
+        if (account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          await cloud.writeFile(account, brandWorkspaceId(workspaceId), path, Buffer.from(data, 'utf8'))
+          return ok(request, { written: true as const })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
+          }
+          if (error instanceof CloudWorkspaceQuotaError) {
+            return err(request, {
+              code: 'workspace-quota-exceeded',
+              message: error.message,
+              details: { maxBytes: MAX_WORKSPACE_BYTES },
+            })
+          }
+          if (error instanceof CloudWorkspacePathError) {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: error.message,
+              details: { path },
+            })
+          }
+          throw error
+        }
       },
     },
 
@@ -3587,7 +3727,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       host(_request, signal) {
         const viewer = currentAccountId()
         const queue = new FrameQueue<RpcRequest<HostFrame>>()
-        const committedWorkspaces = ctx.workspaceRegistry.list()
+        const cloud = ctx.get('cloudWorkspaces')
+        const committedWorkspaces = workspaceRegistry().list()
+          .filter(workspace => cloud === undefined || (viewer !== undefined && cloud.owns(viewer, workspace.id)))
         const committedWorkspaceIds = new Set(
           committedWorkspaces.map(workspace => String(workspace.id)),
         )
@@ -3595,7 +3737,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // Frame-dedup baseline, same posture as committedWorkspaceIds: the
         // stream opens against the current set; workspace.list re-baselines
         // reconnecting clients, so only later changes need frames.
-        let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
+        let archivedSessionIds = workspaceRegistry().archivedSessionIds
         const disposers = [
           ctx.on('session/created', (session: Session) => {
             if (!headerVisibleTo(session.header, viewer)) return
@@ -3631,10 +3773,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 && state.workspaceIds.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
               for (const workspaceId of state.workspaceIds) {
                 if (committedWorkspaceIds.has(workspaceId)) continue
-                const workspace = ctx.workspaceRegistry.get(workspaceId)
+                const workspace = workspaceRegistry().get(workspaceId)
                 if (workspace === undefined) {
                   throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
                 }
+                if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, workspace.id))) continue
                 committedWorkspaceIds.add(workspaceId)
                 queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
               }
@@ -3662,6 +3805,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 type: 'host/workspace-removed',
                 workspaceId: change.key as WorkspaceId,
               }))
+              return
+            }
+            if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, brandWorkspaceId(change.key)))) {
               return
             }
             if (!committedWorkspaceIds.has(change.key)) return

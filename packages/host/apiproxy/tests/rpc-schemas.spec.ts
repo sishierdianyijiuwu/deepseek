@@ -27,6 +27,7 @@ import {
   workspaceInsertSessionBeforeRequestSchema, workspaceInsertSessionBeforeValueSchema,
   workspaceListRequestSchema, workspaceListValueSchema,
   workspaceRenameRequestSchema, workspaceRenameValueSchema, workspaceViewSchema,
+  workspaceWriteRequestSchema, workspaceWriteValueSchema,
 } from '../src/api/workspace.schema.ts'
 import { skillEntrySchema, skillListRequestSchema, skillListValueSchema } from '../src/api/skills.schema.ts'
 import {
@@ -67,6 +68,9 @@ describe('rpcErrorSchema', () => {
     expect(rpcErrorSchema.parse({ code: 'workspace-invalid-path', message: 'm', details: { path: '/x' } }).code).toBe('workspace-invalid-path')
     expect(rpcErrorSchema.parse({ code: 'workspace-name-conflict', message: 'm', details: { name: 'x' } }).code).toBe('workspace-name-conflict')
     expect(rpcErrorSchema.parse({ code: 'workspace-move-invalid', message: 'm', details: { workspaceId: 'w', sessionId: 's' } }).code).toBe('workspace-move-invalid')
+    expect(rpcErrorSchema.parse({ code: 'workspace-required', message: 'm', details: {} }).code).toBe('workspace-required')
+    expect(rpcErrorSchema.parse({ code: 'workspace-limit', message: 'm', details: { max: 3 } }).code).toBe('workspace-limit')
+    expect(rpcErrorSchema.parse({ code: 'workspace-quota-exceeded', message: 'm', details: { maxBytes: 1 } }).code).toBe('workspace-quota-exceeded')
     expect(rpcErrorSchema.parse({
       code: 'model-unavailable',
       message: 'm',
@@ -360,6 +364,7 @@ describe('workspace domain schemas', () => {
     expect(() => workspaceViewSchema.parse({ ...view, sessionIds: 's1' })).toThrow()
     expect(workspaceListRequestSchema.parse({})).toEqual({})
     expect(workspaceListValueSchema.parse({ items: [view], archivedSessionIds: ['s1'] }).items).toHaveLength(1)
+    expect(workspaceListValueSchema.parse({ items: [view], archivedSessionIds: ['s1'], emptyCreate: true }).emptyCreate).toBe(true)
     expect(() => workspaceListValueSchema.parse({ items: [view] })).toThrow()
   })
 
@@ -378,12 +383,17 @@ describe('workspace domain schemas', () => {
     expect(workspaceInsertSessionBeforeValueSchema.parse({ workspace: view }).workspace.workspaceId).toBe('w1')
   })
 
-  it('create requires a path', () => {
+  it('create accepts path, title, or an empty payload', () => {
     expect(workspaceCreateRequestSchema.parse({ path: '/p' }).path).toBe('/p')
-    expect(() => workspaceCreateRequestSchema.parse({})).toThrow()
-    // The retired create-by-name spelling stays a clean schema rejection.
-    expect(() => workspaceCreateRequestSchema.parse({ name: 'n' })).toThrow()
+    expect(workspaceCreateRequestSchema.parse({}).path).toBeUndefined()
+    expect(workspaceCreateRequestSchema.parse({ title: 'N' }).title).toBe('N')
     expect(workspaceCreateValueSchema.parse({ workspace: view, created: false }).created).toBe(false)
+  })
+
+  it('write requires a workspace id, relative path, and data', () => {
+    expect(workspaceWriteRequestSchema.parse({ workspaceId: 'w1', path: 'a.txt', data: 'x' }).path).toBe('a.txt')
+    expect(() => workspaceWriteRequestSchema.parse({ workspaceId: 'w1', path: '', data: 'x' })).toThrow()
+    expect(workspaceWriteValueSchema.parse({ written: true }).written).toBe(true)
   })
 
   it('rename requires a non-blank title (both refine arms)', () => {

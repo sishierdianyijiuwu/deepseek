@@ -88,6 +88,7 @@ function scriptedApi(overrides: {
       insertBefore: r => ok(r, { workspaceIds: [r.payload.workspaceId] }),
       insertSessionBefore: r => ok(r, { workspace: { workspaceId: 'w1' as never, path: '/t', title: 't', sessionIds: [], createdAt: '0', updatedAt: '0' } }),
       archiveSession: r => ok(r, { archivedSessionIds: [r.payload.sessionId] }),
+      write: r => ok(r, { written: true as const }),
     },
     skills: { list: r => ok(r, { skills: [] }), ...overrides.skills },
     agentPresets: {
@@ -435,10 +436,9 @@ describe('workspace domain round trip', () => {
     expect(archivedResponse.result).toEqual({ ok: true, value: { archivedSessionIds: ['s-arch'] } })
   })
 
-  it('rejects a pathless create payload at the handler schema', async () => {
-    const response = await client(scriptedApi()).workspace.create({} as never)
-    expect(response.result.ok).toBe(false)
-    if (!response.result.ok) expect(response.result.error.code).toBe('bad-request')
+  it('accepts a pathless create payload for cloud empty create', async () => {
+    const response = await client(scriptedApi()).workspace.create({})
+    expect(response.result.ok).toBe(true)
   })
 })
 
