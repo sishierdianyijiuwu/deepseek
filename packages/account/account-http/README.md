@@ -10,11 +10,15 @@ HTTP Consumer that registers unauthenticated auth routes on `ctx.webServer` besi
 | POST | `/auth/sign-in` | `{ email, password }` → Sign-in session cookie |
 | POST | `/auth/sign-out` | end the presented Sign-in session |
 | POST | `/auth/resend-verification` | `{ email }` → new mail when unverified |
-| GET | `/auth/me` | current Sign-in session from the cookie |
+| POST | `/auth/request-password-reset` | `{ email }` → reset mail when verified; always `{ ok: true }` |
+| POST | `/auth/reset-password` | `{ token, password }` → new Password; ends every Sign-in session |
+| GET | `/auth/me` | current Sign-in session from the cookie; slides lifetime and refreshes `Max-Age` |
 | GET | `/verify` | `?token=` named host route; redirects to `/?verified=ok` or `/?verified=invalid` |
 | HEAD | `/verify` | 200; does not consume the token |
+| GET | `/reset` | `?token=` named host route; redirects to `/?reset=<token>` without consuming |
+| HEAD | `/reset` | 200; does not consume the token |
 
-The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }` (`mail_failed` when the Unverified Account row exists but the mailer rejected the send); carrier failures use 400/405/413/415/404.
+The Sign-in session id is an HTTP-only `dsh_sign_in` cookie (`Path=/; SameSite=Lax`; `Max-Age` so closing the browser does not end it). Config `cookieSecure` adds `Secure` for HTTPS reverse-proxy deployments. Business outcomes are HTTP 200 JSON `{ ok: true }` or `{ ok: false, error: { code, message } }` (`mail_failed` when the Unverified Account row exists but the mailer rejected the send); carrier failures use 400/405/413/415/404.
 
 ## Model Experience
 

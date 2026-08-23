@@ -36,22 +36,25 @@ Unauthenticated routes are named `webServer` registrations, not `session.registe
 | POST | `/auth/sign-in` |
 | POST | `/auth/sign-out` |
 | POST | `/auth/resend-verification` |
+| POST | `/auth/request-password-reset` |
+| POST | `/auth/reset-password` |
 | GET | `/auth/me` |
 | GET | `/verify` (`HEAD` returns 200 and does not consume the token) |
+| GET | `/reset` (`HEAD` returns 200 and does not consume the token) |
 
 `GET /verify?token=` exists because `frontend-static` 404s unknown pathnames; the handler verifies then redirects to `/?verified=ok` or `/?verified=invalid` so the SPA on `/` can show the outcome. JSON bodies are `{ ok: true }` or `{ ok: false, error: { code, message } }` at HTTP 200 for business results.
 
 ### Sign-in session cookie
 
-The browser presents a server-side Sign-in session id in the HTTP-only cookie `dsh_sign_in` (`Path=/; SameSite=Lax`; `Secure` when `cookieSecure` is set). Product copy still says Sign-in session. The raw id is unguessable hex; PostgreSQL stores SHA-256 of that id. Ticket #2 creates and ends the Sign-in session; sliding 14-day lifetime is ticket #3.
+The browser presents a server-side Sign-in session id in the HTTP-only cookie `dsh_sign_in` (`Path=/; SameSite=Lax`; `Max-Age` so closing the browser does not end it; `Secure` when `cookieSecure` is set). Product copy still says Sign-in session. The raw id is unguessable hex; PostgreSQL stores SHA-256 of that id. `lookupSignIn` slides a live Sign-in session forward by `signInTtlMs` (default 14 days); `/auth/me` refreshes the cookie `Max-Age`. Password reset ends every Sign-in session for that Account ([sliding and reset](../feature/2026-08-23-password-reset-sliding-sign-in.md)).
 
 ### Passwords and tokens
 
-Passwords are scrypt one-way hashes (`scrypt$N$r$p$salt$key`), never Credentials. Verification tokens are 32-byte secrets stored as SHA-256, single-use, with configurable `verificationTtlMs` (default 24h). Duplicate email is rejected by a unique index on the normalized address; concurrent inserts yield one Account. Failed sign-in with a wrong password or unknown email returns the same `invalid_credentials`. An Unverified Account with the correct Password returns `unverified` and does not set a cookie.
+Passwords are scrypt one-way hashes (`scrypt$N$r$p$salt$key`), never Credentials. Verification and password-reset tokens are 32-byte secrets stored as SHA-256, single-use, with configurable `verificationTtlMs` (default 24h) and `passwordResetTtlMs` (default 1h). Duplicate email is rejected by a unique index on the normalized address; concurrent inserts yield one Account. Failed sign-in with a wrong password or unknown email returns the same `invalid_credentials`. An Unverified Account with the correct Password returns `unverified` and does not set a cookie.
 
 ### PostgreSQL
 
-ADR 0017: Account and Sign-in session live in PostgreSQL from v1. Config `url` is `postgres://…` / `postgresql://…`, or `pglite:` for the in-process PostgreSQL engine HTTP tests use. Schema version is `SCHEMA_VERSION = 1`; a mismatch fails at load. Session JSONL stays files.
+ADR 0017: Account and Sign-in session live in PostgreSQL from v1. Config `url` is `postgres://…` / `postgresql://…`, or `pglite:` for the in-process PostgreSQL engine HTTP tests use. Schema version is `SCHEMA_VERSION = 2`; a mismatch fails at load. Session JSONL stays files.
 
 ### Mailer
 
@@ -63,7 +66,7 @@ Parent spec Out of Scope allows local `dsh web` without Accounts. The hosted bun
 
 ### Testing
 
-The source of truth is Loader-composed HTTP: real `fetch` against `127.0.0.1:port`, one cookie jar, fake mailer. Tests assert status, JSON, cookie effects, and whether the fake was invoked — not PostgreSQL rows or hash algorithms.
+The source of truth is Loader-composed HTTP: real `fetch` against `127.0.0.1:port`, cookie jars, a fake mailer, and a fake `Date.now` clock. Tests assert status, JSON, cookie effects, and whether the fake was invoked — not PostgreSQL rows or hash algorithms.
 
 ## Alternatives considered
 
@@ -79,8 +82,8 @@ The source of truth is Loader-composed HTTP: real `fetch` against `127.0.0.1:por
 
 **In-process user-service test seam.** Rejected by the parent spec Testing Decisions. HTTP with a fake mailer is the one seam.
 
-**JWT as the Sign-in session.** Rejected: product vocabulary forbids JWT as a product name, and the spec wants a server-side session id so password reset (later) can end every Sign-in session.
+**JWT as the Sign-in session.** Rejected: product vocabulary forbids JWT as a product name, and the spec wants a server-side session id so password reset can end every Sign-in session.
 
 ## Consequences
 
-Seven new packages and a hosted profile add Loader rows, env configuration, and a cookie on the hosted surface. Local `dsh web` still has no Account. `/api` Session methods remain unauthenticated until ticket #4. Password reset, sliding lifetime, Ban, and Account-scoped Credentials stay later tickets. HTTP tests with PGlite and a fake mailer pin register / verify / sign-in / sign-out without live SMTP or a shared Postgres.
+Seven new packages and a hosted profile add Loader rows, env configuration, and a cookie on the hosted surface. Local `dsh web` still has no Account. `/api` Session methods remain unauthenticated until ticket #4. Ban and Account-scoped Credentials stay later tickets. HTTP tests with PGlite, a fake mailer, and a fake clock pin register / verify / sign-in / sign-out / reset / sliding without live SMTP or a shared Postgres.

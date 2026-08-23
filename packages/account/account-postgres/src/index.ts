@@ -16,6 +16,7 @@ import {
   signInSessionId,
   verifyPassword,
   type RegisterResult,
+  type ResetPasswordResult,
   type SignInLookup,
   type SignInResult,
   type SignInSessionId,
@@ -29,8 +30,10 @@ export { SCHEMA_VERSION }
 
 /** Default verification-token lifetime (24 hours). */
 export const DEFAULT_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000
-/** Default Sign-in session lifetime (14 days; sliding is ticket #3). */
+/** Default Sign-in session lifetime (14 sliding days). */
 export const DEFAULT_SIGN_IN_TTL_MS = 14 * 24 * 60 * 60 * 1000
+/** Default password-reset token lifetime (1 hour). */
+export const DEFAULT_PASSWORD_RESET_TTL_MS = 60 * 60 * 1000
 /** Default minimum Password length. */
 export const DEFAULT_PASSWORD_MIN_LENGTH = 8
 /** Upper bound that keeps scrypt from becoming a request-body bomb. */
@@ -43,12 +46,14 @@ export interface Config {
    * in-process PostgreSQL engine used by tests.
    */
   url: string
-  /** Origin used to build verification URLs (no trailing slash). */
+  /** Origin used to build verification and password-reset URLs (no trailing slash). */
   publicBaseUrl: string
   /** Verification-token lifetime in milliseconds. */
   verificationTtlMs?: number
   /** Sign-in session lifetime in milliseconds. */
   signInTtlMs?: number
+  /** Password-reset token lifetime in milliseconds. */
+  passwordResetTtlMs?: number
   /** Minimum accepted Password length. */
   passwordMinLength?: number
 }
@@ -79,6 +84,7 @@ export class PostgresAccounts extends Accounts {
     publicBaseUrl: z.string().required(),
     verificationTtlMs: z.number().min(1).default(DEFAULT_VERIFICATION_TTL_MS),
     signInTtlMs: z.number().min(1).default(DEFAULT_SIGN_IN_TTL_MS),
+    passwordResetTtlMs: z.number().min(1).default(DEFAULT_PASSWORD_RESET_TTL_MS),
     passwordMinLength: z.number().min(1).default(DEFAULT_PASSWORD_MIN_LENGTH),
   })
 
@@ -88,6 +94,7 @@ export class PostgresAccounts extends Accounts {
   private readonly publicBaseUrl: string
   private readonly verificationTtlMs: number
   private readonly signInTtlMs: number
+  private readonly passwordResetTtlMs: number
   private readonly passwordMinLength: number
 
   /**
@@ -105,6 +112,7 @@ export class PostgresAccounts extends Accounts {
     this.publicBaseUrl = publicBaseUrl.replace(/\/+$/, '')
     this.verificationTtlMs = config.verificationTtlMs ?? DEFAULT_VERIFICATION_TTL_MS
     this.signInTtlMs = config.signInTtlMs ?? DEFAULT_SIGN_IN_TTL_MS
+    this.passwordResetTtlMs = config.passwordResetTtlMs ?? DEFAULT_PASSWORD_RESET_TTL_MS
     this.passwordMinLength = config.passwordMinLength ?? DEFAULT_PASSWORD_MIN_LENGTH
   }
 
@@ -144,9 +152,7 @@ export class PostgresAccounts extends Accounts {
   override async register(email: string, password: string): Promise<RegisterResult> {
     const normalized = normalizeEmail(email)
     if (normalized === undefined) return { ok: false, error: 'invalid_email' }
-    if (password.length < this.passwordMinLength || password.length > PASSWORD_MAX_LENGTH) {
-      return { ok: false, error: 'invalid_password' }
-    }
+    if (this.invalidPassword(password)) return { ok: false, error: 'invalid_password' }
     const id = randomUUID()
     const passwordHash = await hashPassword(password)
     const token = mintSecret()
@@ -281,18 +287,23 @@ export class PostgresAccounts extends Accounts {
   }
 
   /**
-   * Resolve a presented Sign-in session id.
+   * Resolve a presented Sign-in session id and slide its expiry forward.
    * @param signInId - the id the browser presented.
    * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
    */
   override async lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined> {
     const now = Date.now()
+    const expiresAt = now + this.signInTtlMs
     const found = await this.client().query(
-      `SELECT s.account_id, a.email, s.expires_at
-       FROM sign_in_sessions s
-       JOIN accounts a ON a.id = s.account_id
-       WHERE s.id_hash = $1 AND s.expires_at > $2 AND a.verified_at IS NOT NULL`,
-      [hashSecret(signInId), now],
+      `UPDATE sign_in_sessions s
+       SET expires_at = $1
+       FROM accounts a
+       WHERE s.id_hash = $2
+         AND s.expires_at > $3
+         AND s.account_id = a.id
+         AND a.verified_at IS NOT NULL
+       RETURNING s.account_id, a.email, s.expires_at`,
+      [expiresAt, hashSecret(signInId), now],
     )
     const row = found.rows[0] as SignInRow | undefined
     if (row === undefined) return undefined
@@ -301,6 +312,76 @@ export class PostgresAccounts extends Accounts {
       email: row.email,
       expiresAt: Number(row.expires_at),
     }
+  }
+
+  /**
+   * Send a password-reset message for a verified Account.
+   * @param email - visitor-supplied email.
+   */
+  override async requestPasswordReset(email: string): Promise<void> {
+    const normalized = normalizeEmail(email)
+    if (normalized === undefined) return
+    const token = mintSecret()
+    const now = Date.now()
+    const updated = await this.client().transaction(async (sql) => {
+      const found = await sql.query(
+        'SELECT id, verified_at FROM accounts WHERE email_normalized = $1 FOR UPDATE',
+        [normalized],
+      )
+      const account = found.rows[0] as Pick<AccountRow, 'id' | 'verified_at'> | undefined
+      if (account === undefined || account.verified_at == null) return false
+      await sql.query(
+        `INSERT INTO password_reset_tokens (token_hash, account_id, expires_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (account_id) DO UPDATE
+         SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at`,
+        [token.hash, account.id, now + this.passwordResetTtlMs],
+      )
+      return true
+    })
+    if (!updated) return
+    try {
+      await this.sendPasswordReset(normalized, token.raw)
+    } catch {
+      // Mailer I/O. HTTP request-reset stays 200 so the route cannot enumerate Accounts.
+    }
+  }
+
+  /**
+   * Consume a password-reset token, set a new Password, and end every Sign-in session.
+   * @param token - raw token from the password-reset URL.
+   * @param password - visitor-supplied new Password.
+   * @returns whether the Password was changed.
+   */
+  override async resetPassword(token: string, password: string): Promise<ResetPasswordResult> {
+    if (this.invalidPassword(password)) return { ok: false, error: 'invalid_password' }
+    if (token.length === 0) return { ok: false, error: 'invalid_or_expired' }
+    const tokenHash = hashSecret(token)
+    const now = Date.now()
+    return this.client().transaction(async (sql) => {
+      const found = await sql.query(
+        `DELETE FROM password_reset_tokens
+         WHERE token_hash = $1 AND expires_at > $2
+         RETURNING account_id`,
+        [tokenHash, now],
+      )
+      const row = found.rows[0] as TokenRow | undefined
+      if (row === undefined) return { ok: false, error: 'invalid_or_expired' }
+      const passwordHash = await hashPassword(password)
+      await sql.query(
+        'UPDATE accounts SET password_hash = $1 WHERE id = $2',
+        [passwordHash, row.account_id],
+      )
+      await sql.query(
+        'DELETE FROM sign_in_sessions WHERE account_id = $1',
+        [row.account_id],
+      )
+      return { ok: true }
+    })
+  }
+
+  private invalidPassword(password: string): boolean {
+    return password.length < this.passwordMinLength || password.length > PASSWORD_MAX_LENGTH
   }
 
   private async dummyPasswordHash(): Promise<string> {
@@ -314,6 +395,15 @@ export class PostgresAccounts extends Accounts {
       to,
       subject: 'Verify your email',
       text: `Verify this email address by opening:\n${verifyUrl}\n`,
+    })
+  }
+
+  private async sendPasswordReset(to: string, rawToken: string): Promise<void> {
+    const resetUrl = `${this.publicBaseUrl}/reset?token=${rawToken}`
+    await this.mailer.send({
+      to,
+      subject: 'Reset your password',
+      text: `Reset the Password for this Account by opening:\n${resetUrl}\n`,
     })
   }
 }

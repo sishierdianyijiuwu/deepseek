@@ -6,7 +6,7 @@
 import type { SqlClient } from './sql.ts'
 
 /** Monotonic schema version stored in `account_schema`. */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 const DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS account_schema (
@@ -31,10 +31,15 @@ const DDL: readonly string[] = [
   created_at BIGINT NOT NULL,
   expires_at BIGINT NOT NULL
 )`,
+  `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  token_hash TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+  expires_at BIGINT NOT NULL
+)`,
 ]
 
 /**
- * Apply the v1 schema or refuse a foreign version.
+ * Apply the current schema or refuse a foreign version.
  * @param sql - connected client.
  */
 export async function ensureSchema(sql: SqlClient): Promise<void> {

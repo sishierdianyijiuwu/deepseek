@@ -9,6 +9,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type {
   AccountId,
   RegisterResult,
+  ResetPasswordResult,
   SignInLookup,
   SignInResult,
   SignInSessionId,
@@ -20,7 +21,9 @@ export { equalSecretHash, hashSecret, mintSecret } from './secret.ts'
 export { normalizeEmail } from './email.ts'
 export type {
   AccountId,
+  PasswordResetMail,
   RegisterResult,
+  ResetPasswordResult,
   SignInLookup,
   SignInResult,
   SignInSessionId,
@@ -104,11 +107,29 @@ export abstract class Accounts extends Service {
   abstract signOut(signInId: SignInSessionId): Promise<void>
 
   /**
-   * Resolve a presented Sign-in session id to the owning Account.
+   * Resolve a presented Sign-in session id to the owning Account. A live
+   * Sign-in session is slid forward by the configured lifetime.
    * @param signInId - the id the browser presented.
    * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
    */
   abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>
+
+  /**
+   * Send a password-reset message when the email belongs to a verified Account.
+   * Unknown or Unverified addresses are a silent success so the call cannot
+   * enumerate Accounts.
+   * @param email - visitor-supplied email.
+   */
+  abstract requestPasswordReset(email: string): Promise<void>
+
+  /**
+   * Consume a single-use password-reset token, set a new Password, and end
+   * every Sign-in session for that Account.
+   * @param token - raw token from the password-reset URL.
+   * @param password - visitor-supplied new Password.
+   * @returns whether the Password was changed.
+   */
+  abstract resetPassword(token: string, password: string): Promise<ResetPasswordResult>
 }
 
 export default Accounts

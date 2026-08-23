@@ -26,13 +26,18 @@ export type SignInResult =
   | { ok: true; signInId: SignInSessionId; expiresAt: number }
   | { ok: false; error: 'invalid_credentials' | 'unverified' }
 
+/** Outcome of {@link import('./index.ts').Accounts.resetPassword}. */
+export type ResetPasswordResult =
+  | { ok: true }
+  | { ok: false; error: 'invalid_or_expired' | 'invalid_password' }
+
 /** A live Sign-in session looked up from the id the browser presented. */
 export interface SignInLookup {
   /** Owning Account. */
   accountId: AccountId
   /** Normalized email of the Account. */
   email: string
-  /** Epoch-ms expiry of this Sign-in session. */
+  /** Epoch-ms expiry of this Sign-in session after the latest slide. */
   expiresAt: number
 }
 
@@ -42,4 +47,12 @@ export interface VerificationMail {
   to: string
   /** Absolute verification URL including the secret token. */
   verifyUrl: string
+}
+
+/** A password-reset message the mailer delivers. */
+export interface PasswordResetMail {
+  /** Recipient email. */
+  to: string
+  /** Absolute password-reset URL including the secret token. */
+  resetUrl: string
 }

@@ -50,6 +50,11 @@ export function apply(ctx: Context, config: Config): void {
     path: '/verify',
     handler: (req, res) => handleVerify(req, res, accounts),
   }), 'account-http: /verify')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/reset',
+    handler: (req, res) => { handleResetLink(req, res) },
+  }), 'account-http: /reset')
 }
 
 /**
@@ -75,7 +80,7 @@ export async function handleAuth(
       res.end()
       return
     }
-    await sendMe(req, res, accounts)
+    await sendMe(req, res, accounts, cookieSecure)
     return
   }
   if (method !== 'POST') {
@@ -138,6 +143,36 @@ export async function handleAuth(
     writeJson(res, 200, { ok: true })
     return
   }
+  if (url.pathname === '/auth/request-password-reset') {
+    const body = await readJsonObject(req, res)
+    if (body === undefined) return
+    const email = stringField(body, 'email')
+    if (email === undefined) {
+      writeJson(res, 200, failure('invalid_request', 'email is required'))
+      return
+    }
+    await accounts.requestPasswordReset(email)
+    writeJson(res, 200, { ok: true })
+    return
+  }
+  if (url.pathname === '/auth/reset-password') {
+    const body = await readJsonObject(req, res)
+    if (body === undefined) return
+    const token = stringField(body, 'token')
+    const password = stringField(body, 'password')
+    if (token === undefined || password === undefined) {
+      writeJson(res, 200, failure('invalid_request', 'token and password are required'))
+      return
+    }
+    const result = await accounts.resetPassword(token, password)
+    if (!result.ok) {
+      writeJson(res, 200, failure(result.error, resetMessage(result.error)))
+      return
+    }
+    res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, '', 0, cookieSecure))
+    writeJson(res, 200, { ok: true })
+    return
+  }
   res.writeHead(404)
   res.end()
 }
@@ -175,10 +210,39 @@ export async function handleVerify(
   res.end()
 }
 
+/**
+ * Land a mailbox password-reset link on the SPA without consuming the token.
+ * HEAD returns 200 so mail scanners do not burn the single-use secret.
+ * @param req - incoming request.
+ * @param res - response to write.
+ */
+export function handleResetLink(
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  /* v8 ignore next -- node:http always sets method on server requests */
+  const method = req.method ?? 'GET'
+  if (method === 'HEAD') {
+    res.writeHead(200)
+    res.end()
+    return
+  }
+  if (method !== 'GET') {
+    res.writeHead(405, { allow: 'GET, HEAD' })
+    res.end()
+    return
+  }
+  /* v8 ignore next -- node:http always sets url on server requests */
+  const token = new URL(req.url ?? '/', 'http://dsh.internal').searchParams.get('token') ?? ''
+  res.writeHead(302, { location: `/?reset=${encodeURIComponent(token)}` })
+  res.end()
+}
+
 async function sendMe(
   req: IncomingMessage,
   res: ServerResponse,
   accounts: Accounts,
+  cookieSecure: boolean,
 ): Promise<void> {
   const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
   if (id === undefined) {
@@ -190,6 +254,8 @@ async function sendMe(
     writeJson(res, 200, { ok: true, signedIn: false })
     return
   }
+  const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
+  res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, id, maxAge, cookieSecure))
   writeJson(res, 200, { ok: true, signedIn: true, email: session.email })
 }
 
@@ -324,4 +390,9 @@ function registerMessage(
 function signInMessage(code: 'invalid_credentials' | 'unverified'): string {
   if (code === 'unverified') return 'Verify the email address before signing in'
   return 'Email or password is incorrect'
+}
+
+function resetMessage(code: 'invalid_or_expired' | 'invalid_password'): string {
+  if (code === 'invalid_password') return 'Password is too short'
+  return 'That reset link is invalid or expired'
 }

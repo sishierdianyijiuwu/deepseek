@@ -8,20 +8,30 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import { Mailer, type MailMessage } from '@deepseek-ai/dsh-mailer'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
-import PostgresAccounts from '@deepseek-ai/dsh-account-postgres'
+import PostgresAccounts, { DEFAULT_SIGN_IN_TTL_MS } from '@deepseek-ai/dsh-account-postgres'
 import * as AccountHttp from '../src/index.ts'
 import { MAX_AUTH_BODY_BYTES, SIGN_IN_COOKIE } from '../src/index.ts'
+
+const CLOCK_ORIGIN = 1_700_000_000_000
+const DAY_MS = 24 * 60 * 60 * 1000
+let nowMs = CLOCK_ORIGIN
 
 let root: string | undefined
 let context: Context | undefined
 
+beforeEach(() => {
+  nowMs = CLOCK_ORIGIN
+  vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+})
+
 afterEach(async () => {
+  vi.restoreAllMocks()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -68,7 +78,11 @@ interface Harness {
   jar: CookieJar
 }
 
-async function boot(overrides?: { verificationTtlMs?: number; signInTtlMs?: number }): Promise<Harness> {
+async function boot(overrides?: {
+  verificationTtlMs?: number
+  signInTtlMs?: number
+  passwordResetTtlMs?: number
+}): Promise<Harness> {
   mailbox.length = 0
   failSend = false
   root = await mkdtemp(join(tmpdir(), 'dsh-account-http-'))
@@ -88,6 +102,9 @@ async function boot(overrides?: { verificationTtlMs?: number; signInTtlMs?: numb
       : []),
     ...(overrides?.signInTtlMs !== undefined
       ? [`    signInTtlMs: ${String(overrides.signInTtlMs)}`]
+      : []),
+    ...(overrides?.passwordResetTtlMs !== undefined
+      ? [`    passwordResetTtlMs: ${String(overrides.passwordResetTtlMs)}`]
       : []),
     "- name: '@deepseek-ai/dsh-account-http'",
     '',
@@ -122,16 +139,17 @@ async function request(
   harness: Harness,
   path: string,
   init: RequestInit = {},
+  jar: CookieJar = harness.jar,
 ): Promise<{ status: number; json: unknown; location: string | null; headers: Headers }> {
   const headers = new Headers(init.headers)
-  const cookie = harness.jar.header()
+  const cookie = jar.header()
   if (cookie !== '' && !headers.has('cookie')) headers.set('cookie', cookie)
   const response = await fetch(`http://127.0.0.1:${String(harness.port)}${path}`, {
     ...init,
     headers,
     redirect: 'manual',
   })
-  harness.jar.absorb(response)
+  jar.absorb(response)
   const text = await response.text()
   let json: unknown = text
   if (text !== '') {
@@ -140,18 +158,23 @@ async function request(
   return { status: response.status, json, location: response.headers.get('location'), headers: response.headers }
 }
 
-function post(harness: Harness, path: string, body: unknown): ReturnType<typeof request> {
+function post(
+  harness: Harness,
+  path: string,
+  body: unknown,
+  jar?: CookieJar,
+): ReturnType<typeof request> {
   return request(harness, path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-  })
+  }, jar)
 }
 
-function tokenFromMailbox(): string {
+function tokenFromMailbox(kind: 'verify' | 'reset' = 'verify'): string {
   const last = mailbox.at(-1)
   expect(last).toBeDefined()
-  const match = /\/verify\?token=([0-9a-f]+)/.exec(last?.text ?? '')
+  const match = new RegExp(`/${kind}\\?token=([0-9a-f]+)`).exec(last?.text ?? '')
   expect(match?.[1]).toBeDefined()
   return match![1]!
 }
@@ -212,6 +235,7 @@ describe('auth HTTP', () => {
     const setCookie = signedIn.headers.getSetCookie().join('; ')
     expect(setCookie).toContain('HttpOnly')
     expect(setCookie).toContain('SameSite=Lax')
+    expect(setCookie).toContain(`Max-Age=${String(DEFAULT_SIGN_IN_TTL_MS / 1000)}`)
     expect(setCookie).not.toContain('Secure')
 
     const me = await request(harness, '/auth/me')
@@ -229,7 +253,7 @@ describe('auth HTTP', () => {
     const password = 'correct-horse'
     await post(harness, '/auth/register', { email, password })
     const first = tokenFromMailbox()
-    await new Promise(resolve => setTimeout(resolve, 50))
+    nowMs += 50
     expect((await request(harness, `/verify?token=${first}`)).location).toBe('/?verified=invalid')
 
     await post(harness, '/auth/resend-verification', { email })
@@ -271,6 +295,21 @@ describe('auth HTTP', () => {
     expect((await post(harness, '/auth/register', { email: 1 })).json).toMatchObject({ ok: false, error: { code: 'invalid_request' } })
     expect((await post(harness, '/auth/sign-in', { email: 'a@b.c' })).json).toMatchObject({ ok: false, error: { code: 'invalid_request' } })
     expect((await post(harness, '/auth/resend-verification', {})).json).toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await post(harness, '/auth/request-password-reset', {})).json).toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await post(harness, '/auth/reset-password', { token: 'x' })).json).toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await request(harness, '/auth/request-password-reset', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    })).status).toBe(400)
+    expect((await request(harness, '/auth/reset-password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    })).status).toBe(400)
+    expect((await request(harness, '/reset', { method: 'POST' })).status).toBe(405)
+    expect((await request(harness, '/reset', { method: 'HEAD' })).status).toBe(200)
+    expect((await request(harness, '/reset')).location).toBe('/?reset=')
     expect((await request(harness, '/auth/sign-in', {
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
@@ -388,5 +427,144 @@ describe('auth HTTP', () => {
     await request(harness, `/verify?token=${tokenFromMailbox()}`)
     const signedIn = await post(harness, '/auth/sign-in', { email: 'secure@example.com', password: 'correct-horse' })
     expect(signedIn.headers.getSetCookie().join('; ')).toContain('Secure')
+  })
+
+  it('resets the Password, ends every Sign-in session, and refuses reuse', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'reset@example.com'
+    const password = 'correct-horse'
+    const nextPassword = 'correct-zebra'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+
+    const silentUnknown = await post(harness, '/auth/request-password-reset', { email: 'nobody@example.com' })
+    expect(silentUnknown.json).toEqual({ ok: true })
+    expect(mailbox).toHaveLength(1)
+
+    const unverified = await post(harness, '/auth/register', { email: 'unverified-reset@example.com', password })
+    expect(unverified.json).toEqual({ ok: true })
+    const beforeUnverified = mailbox.length
+    expect((await post(harness, '/auth/request-password-reset', { email: 'unverified-reset@example.com' })).json)
+      .toEqual({ ok: true })
+    expect(mailbox).toHaveLength(beforeUnverified)
+
+    await post(harness, '/auth/sign-in', { email, password })
+    const other = new CookieJar()
+    await post(harness, '/auth/sign-in', { email, password }, other)
+    expect(harness.jar.hasSignIn()).toBe(true)
+    expect(other.hasSignIn()).toBe(true)
+
+    failSend = true
+    expect((await post(harness, '/auth/request-password-reset', { email })).json).toEqual({ ok: true })
+    expect(mailbox).toHaveLength(beforeUnverified)
+    failSend = false
+
+    expect((await post(harness, '/auth/request-password-reset', { email })).json).toEqual({ ok: true })
+    const firstReset = tokenFromMailbox('reset')
+    expect((await post(harness, '/auth/request-password-reset', { email })).json).toEqual({ ok: true })
+    const resetToken = tokenFromMailbox('reset')
+    expect(resetToken).not.toBe(firstReset)
+
+    const scanned = await request(harness, `/reset?token=${resetToken}`, { method: 'HEAD' })
+    expect(scanned.status).toBe(200)
+    expect(scanned.location).toBeNull()
+    const landed = await request(harness, `/reset?token=${resetToken}`)
+    expect(landed.status).toBe(302)
+    expect(landed.location).toBe(`/?reset=${resetToken}`)
+
+    expect((await post(harness, '/auth/reset-password', { token: firstReset, password: nextPassword })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_or_expired' } })
+    expect((await post(harness, '/auth/reset-password', { token: resetToken, password: 'short' })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_password' } })
+
+    const reset = await post(harness, '/auth/reset-password', { token: resetToken, password: nextPassword })
+    expect(reset.json).toEqual({ ok: true })
+    expect(harness.jar.hasSignIn()).toBe(false)
+    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
+    expect((await request(harness, '/auth/me', {}, other)).json).toEqual({ ok: true, signedIn: false })
+
+    expect((await post(harness, '/auth/sign-in', { email, password })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_credentials' } })
+    const signedIn = await post(harness, '/auth/sign-in', { email, password: nextPassword })
+    expect(signedIn.json).toEqual({ ok: true })
+    expect(harness.jar.hasSignIn()).toBe(true)
+
+    expect((await post(harness, '/auth/reset-password', { token: resetToken, password: 'correct-horse2' })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_or_expired' } })
+    expect((await post(harness, '/auth/reset-password', { token: '', password: nextPassword })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_or_expired' } })
+    expect((await post(harness, '/auth/request-password-reset', { email: 'not-an-email' })).json)
+      .toEqual({ ok: true })
+  })
+
+  it('lets only one concurrent reset consume the token', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'race-reset@example.com'
+    const password = 'correct-horse'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    await post(harness, '/auth/request-password-reset', { email })
+    const token = tokenFromMailbox('reset')
+    const concurrent = await Promise.all([
+      post(harness, '/auth/reset-password', { token, password: 'correct-zebra' }),
+      post(harness, '/auth/reset-password', { token, password: 'correct-yak12' }),
+    ])
+    const outcomes = concurrent.map((row) => {
+      const body = row.json as { ok: boolean; error?: { code: string } }
+      return body.ok ? 'ok' : body.error?.code
+    })
+    expect(outcomes.sort()).toEqual(['invalid_or_expired', 'ok'])
+    const zebra = await post(harness, '/auth/sign-in', { email, password: 'correct-zebra' })
+    const yak = await post(harness, '/auth/sign-in', { email, password: 'correct-yak12' })
+    const signedIn = [zebra, yak].filter(row => (row.json as { ok: boolean }).ok)
+    expect(signedIn).toHaveLength(1)
+  })
+
+  it('expires a password-reset token under a fake clock', { timeout: 60_000 }, async () => {
+    const harness = await boot({ passwordResetTtlMs: 30 })
+    const email = 'expire-reset@example.com'
+    const password = 'correct-horse'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    await post(harness, '/auth/request-password-reset', { email })
+    const token = tokenFromMailbox('reset')
+    nowMs += 31
+    expect((await post(harness, '/auth/reset-password', { token, password: 'correct-zebra' })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_or_expired' } })
+  })
+
+  it('slides a Sign-in session on /auth/me and persists past a browser close', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'slide@example.com'
+    const password = 'correct-horse'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    const signedIn = await post(harness, '/auth/sign-in', { email, password })
+    expect(signedIn.headers.getSetCookie().join('; '))
+      .toContain(`Max-Age=${String(DEFAULT_SIGN_IN_TTL_MS / 1000)}`)
+
+    nowMs += 13 * DAY_MS
+    const slid = await request(harness, '/auth/me')
+    expect(slid.json).toEqual({ ok: true, signedIn: true, email })
+    expect(slid.headers.getSetCookie().join('; '))
+      .toContain(`Max-Age=${String(DEFAULT_SIGN_IN_TTL_MS / 1000)}`)
+
+    nowMs += 13 * DAY_MS
+    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: true, email })
+
+    nowMs += DEFAULT_SIGN_IN_TTL_MS + 1
+    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
+  })
+
+  it('ends a Sign-in session that sits idle past 14 days', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'idle@example.com'
+    const password = 'correct-horse'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    await post(harness, '/auth/sign-in', { email, password })
+    nowMs += DEFAULT_SIGN_IN_TTL_MS + 1
+    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
+    expect(harness.jar.hasSignIn()).toBe(true)
   })
 })
