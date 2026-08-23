@@ -10,6 +10,7 @@ import {
   Accounts,
   accountId,
   SIGN_IN_COOKIE,
+  type BanResult,
   type RegisterResult,
   type ResetPasswordResult,
   type SignInLookup,
@@ -46,6 +47,7 @@ class FakeAccounts extends Accounts {
       accountId: accountId('account-a'),
       email: 'a@example.com',
       expiresAt: Date.now() + 60_000,
+      operator: false,
     })
   }
   override requestPasswordReset(): Promise<void> {
@@ -53,6 +55,18 @@ class FakeAccounts extends Accounts {
   }
   override resetPassword(): Promise<ResetPasswordResult> {
     return Promise.resolve({ ok: false, error: 'invalid_or_expired' })
+  }
+  override ban(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override setRegistrationFrozen(): Promise<void> {
+    return Promise.resolve()
+  }
+  override isRegistrationFrozen(): Promise<boolean> {
+    return Promise.resolve(false)
   }
 }
 

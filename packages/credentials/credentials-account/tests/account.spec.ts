@@ -12,6 +12,7 @@ import {
   Accounts,
   accountId,
   runWithAccount,
+  type BanResult,
   type RegisterResult,
   type ResetPasswordResult,
   type SignInLookup,
@@ -51,6 +52,18 @@ class FakeAccounts extends Accounts {
   }
   override resetPassword(): Promise<ResetPasswordResult> {
     return Promise.resolve({ ok: false, error: 'invalid_or_expired' })
+  }
+  override ban(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override setRegistrationFrozen(): Promise<void> {
+    return Promise.resolve()
+  }
+  override isRegistrationFrozen(): Promise<boolean> {
+    return Promise.resolve(false)
   }
 }
 
