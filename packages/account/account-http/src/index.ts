@@ -14,6 +14,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace-cloud'
+import type {} from '@deepseek-ai/dsh-e2b'
+import type {} from '@deepseek-ai/dsh-agent'
 
 /** Maximum JSON body accepted on auth POST routes. */
 export const MAX_AUTH_BODY_BYTES = 64 * 1024
@@ -200,6 +202,7 @@ export async function handleAuth(
       return
     }
     try {
+      await stopOwnedExecutingSession(ctx, session.accountId)
       await eraseOwnedData(ctx, session.accountId, requireOwnedErase)
       await accounts.deleteAccount(session.accountId)
     } finally {
@@ -384,6 +387,30 @@ async function requireOperator(
   const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
   res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, id, maxAge, cookieSecure))
   return session
+}
+
+/**
+ * Cancel this Account's live Agents and kill its E2B Executing Session before
+ * owned files are erased. Copy-back is skipped because the durable tree is
+ * about to be deleted. Missing `e2b`, process-wide mode, and no live slot are
+ * no-ops.
+ * @param ctx - Cordis context that may carry `e2b` and `agents`.
+ * @param accountId - Account whose Executing Session should stop.
+ */
+async function stopOwnedExecutingSession(ctx: Context, accountId: AccountId): Promise<void> {
+  const e2b = ctx.get('e2b')
+  if (e2b === undefined || e2b.perExecutingSession !== true) return
+  const sessionId = e2b.executingSessionId(accountId)
+  if (sessionId === undefined) return
+  const agents = ctx.get('agents')
+  if (agents !== undefined) {
+    for (const agent of agents.list()) {
+      if (agent.session.header.owner === accountId) {
+        agent.cancel({ kind: 'disposed' })
+      }
+    }
+  }
+  await e2b.stopExecutingSession(accountId, sessionId)
 }
 
 /**

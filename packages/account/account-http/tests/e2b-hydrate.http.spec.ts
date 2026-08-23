@@ -4,7 +4,7 @@
  * and the daily E2B minute cap are observed as HTTP status and RPC bodies.
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -159,10 +159,14 @@ class FakeCredentials extends Service {
   set(): Promise<void> {
     return Promise.resolve()
   }
+
+  eraseOwned(): Promise<void> {
+    return Promise.resolve()
+  }
 }
 
 class FakeE2B extends Service {
-  readonly perExecutingSession = true
+  perExecutingSession = true
   readonly dailyCapMinutes = 60
   readonly cwd = '/home/user/workspace'
   private readonly accountSlots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
@@ -259,7 +263,10 @@ class IsolatedApiProxy extends Service {
     const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
     ctx.storage.mount('domain', storageDomain)
     ctx.provide('storageDomain', storageDomain)
-    ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([]),
+      deleteOwned: () => Promise.resolve(),
+    } as never)
     ctx.agents.setFactory({
       createAgent: async (ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> => {
         const session = ctx.sessions.create(options.sessionId, {
@@ -287,7 +294,10 @@ class IsolatedApiProxy extends Service {
           session,
           ctx: agentCtx,
           inbox: { nextTurn: [], nextStep: [] },
-          cancel: () => undefined,
+          cancel: () => {
+            live.status = 'idle'
+            idleGates.get(session.id)?.resolve(undefined)
+          },
           followup: beginTurn,
           steer: beginTurn,
           whenIdle: () => {
@@ -871,5 +881,151 @@ describe('E2B Executing Session over HTTP', () => {
       content: [{ type: 'text', text: 'c' }],
     })
     expect(rpcError(exhausted.body)).toBe('e2b-cap-exhausted')
+  })
+
+  it('stops a live E2B Executing Session on Deletion without copy-back', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'gone-live@example.com'
+    const jar = await signInAccount(harness, email, password)
+    const keepJar = await signInAccount(harness, 'keep-live@example.com', password)
+    const keepCreated = await rpc(harness, keepJar, 'workspace.create', { title: 'Keep' })
+    const keepWorkspaceId = (keepCreated.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    const keepSession = await rpc(harness, keepJar, 'session.create', { workspaceId: keepWorkspaceId })
+    expect((keepSession.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Live' })
+    const workspace = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string; path?: string } } }
+    }).result?.value?.workspace
+    expect(workspace?.path).toEqual(expect.any(String))
+    expect((await rpc(harness, jar, 'workspace.write', {
+      workspaceId: workspace!.workspaceId, path: 'note.txt', data: 'hello',
+    })).status).toBe(200)
+    const session = await rpc(harness, jar, 'session.create', { workspaceId: workspace!.workspaceId })
+    const sessionId = (session.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'run' }],
+    })).status).toBe(200)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
+
+    expect(await (await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).json()).toEqual({ ok: true })
+    expect(e2b.hasLiveSlot()).toBe(false)
+    expect(currentWorld?.killed).toBe(true)
+    await expect(stat(workspace!.path!)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await (await raw(harness, jar, '/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })).json()).toEqual({ ok: true })
+  })
+
+  it('deletes an Account when E2B is composed but no Executing Session is live', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'gone-idle@example.com'
+    const jar = await signInAccount(harness, email, password)
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Idle' })
+    const workspace = (created.body as {
+      result?: { value?: { workspace?: { path?: string } } }
+    }).result?.value?.workspace
+    expect(workspace?.path).toEqual(expect.any(String))
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    expect(e2b.hasLiveSlot()).toBe(false)
+    expect(await (await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).json()).toEqual({ ok: true })
+    expect(e2b.hasLiveSlot()).toBe(false)
+    await expect(stat(workspace!.path!)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await (await raw(harness, jar, '/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })).json()).toEqual({ ok: true })
+  })
+
+  it('stops a live Executing Session when Agents are not composed', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'gone-no-agents@example.com'
+    const jar = await signInAccount(harness, email, password)
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'NoAgents' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const session = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionId = (session.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'run' }],
+    })).status).toBe(200)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B) || context === undefined) throw new Error('fake e2b missing')
+    const lookup = context.get.bind(context)
+    vi.spyOn(context, 'get').mockImplementation(((key: string) => {
+      if (key === 'agents') return undefined
+      return lookup(key as never)
+    }) as typeof context.get)
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(await (await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).json()).toEqual({ ok: true })
+    expect(e2b.hasLiveSlot()).toBe(false)
+    expect(currentWorld?.killed).toBe(true)
+  })
+
+  it('does not kill a process-wide E2B sandbox on Deletion', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'process-wide@example.com'
+    const jar = await signInAccount(harness, email, password)
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Shared' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const session = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionId = (session.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'run' }],
+    })).status).toBe(200)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    e2b.perExecutingSession = false
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(await (await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).json()).toEqual({ ok: true })
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
   })
 })

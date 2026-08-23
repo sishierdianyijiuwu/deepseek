@@ -20,4 +20,4 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **此处不计每日 E2B 分钟** — hydrate 与回拷负责 1 GiB 摄入；UTC 日运行时长上限是后续工单。
+- **此处不计每日 E2B 分钟** — workspace-cloud 负责 1 GiB 摄入；UTC 日分钟上限由 Host／`dsh-e2b` 负责。
