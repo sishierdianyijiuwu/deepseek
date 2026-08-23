@@ -12,6 +12,7 @@ import {
   Accounts,
   accountId,
   runWithAccount,
+  type AccountId,
   type AccountLookup,
   type BanResult,
   type DeleteResult,
@@ -83,6 +84,15 @@ class FakeAccounts extends Accounts {
   }
   override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
     return Promise.resolve([])
+  }
+  override beginExecutingWorld(_id: AccountId, at: number): Promise<number> {
+    return Promise.resolve(at)
+  }
+  override endExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override executingWorldUsedMs(): Promise<number> {
+    return Promise.resolve(0)
   }
 }
 

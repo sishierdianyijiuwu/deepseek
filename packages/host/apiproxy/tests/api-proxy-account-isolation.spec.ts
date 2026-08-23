@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Accounts, accountId, runWithAccount, runWithOperatorAccess } from '@deepseek-ai/dsh-account'
 import type {
+  AccountId,
   AccountLookup,
   BanResult,
   DeleteResult,
@@ -91,6 +92,15 @@ class FakeAccounts extends Accounts {
   }
   override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
     return Promise.resolve(auditLog.map((entry, index) => ({ id: `audit-${String(index + 1)}`, ...entry })))
+  }
+  override beginExecutingWorld(_id: AccountId, at: number): Promise<number> {
+    return Promise.resolve(at)
+  }
+  override endExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override executingWorldUsedMs(): Promise<number> {
+    return Promise.resolve(0)
   }
 }
 

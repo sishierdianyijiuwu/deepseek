@@ -55,6 +55,12 @@ export interface Config {
    * rather than one eager process-wide sandbox. Hosted control plane sets this.
    */
   perExecutingSession?: boolean
+  /**
+   * Minutes of sandbox-running time each Account may use per UTC day.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
+   */
+  dailyCapMinutes?: number
 }
 
 interface ResolvedConfig {
@@ -62,12 +68,14 @@ interface ResolvedConfig {
   cwd: string
   timeoutMs: number
   perExecutingSession: boolean
+  dailyCapMinutes: number
 }
 
 interface SchemaResolvedConfig extends Config {
   cwd: string
   timeoutMs: number
   perExecutingSession: boolean
+  dailyCapMinutes: number
 }
 
 /** Another Executing Session already holds this Account's sandbox. */
@@ -116,6 +124,7 @@ export class E2BRuntime extends Service {
     cwd: z.string().default('/home/user/workspace'),
     timeoutMs: z.number().default(300_000),
     perExecutingSession: z.boolean().default(false),
+    dailyCapMinutes: z.number().default(60),
   })
 
   /** Validated remote working directory shared by provider adapters. */
@@ -124,6 +133,8 @@ export class E2BRuntime extends Service {
   readonly runtimeRoot: string
   /** Whether sandboxes are created per Executing Session instead of process-wide. */
   readonly perExecutingSession: boolean
+  /** Minutes of sandbox-running time each Account may use per UTC day. */
+  readonly dailyCapMinutes: number
 
   private readonly config: ResolvedConfig
   private readonly ready: Promise<Sandbox> | undefined
@@ -141,11 +152,13 @@ export class E2BRuntime extends Service {
       cwd: resolved.cwd,
       timeoutMs: resolved.timeoutMs,
       perExecutingSession: resolved.perExecutingSession === true,
+      dailyCapMinutes: resolved.dailyCapMinutes,
     }
     this.validate()
     this.cwd = this.config.cwd
     this.runtimeRoot = posix.join(this.cwd, '.dsh-e2b')
     this.perExecutingSession = this.config.perExecutingSession
+    this.dailyCapMinutes = this.config.dailyCapMinutes
     if (!this.perExecutingSession) {
       this.ready = this.open()
       // A deployment may load the owner before any adapter uses it. Keep a
@@ -197,14 +210,19 @@ export class E2BRuntime extends Service {
    * Create or reuse this Account's Executing Session sandbox.
    * @param accountId - owning Account.
    * @param sessionId - Session that holds the one-executing-session lock.
+   * @param opts.onCreated - runs on the Account chain after a new sandbox is live.
    * @returns the live sandbox and whether this call reused an existing slot.
    * @throws {@link ExecutingSessionBusyError} when another Session holds the lock.
    */
-  async startExecutingSession(accountId: AccountId, sessionId: SessionId): Promise<ExecutingSessionStart> {
+  async startExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ): Promise<ExecutingSessionStart> {
     if (!this.perExecutingSession) {
       return { sandbox: await this.getSandbox(), reused: true }
     }
-    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId))
+    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId, opts))
   }
 
   /**
@@ -213,17 +231,19 @@ export class E2BRuntime extends Service {
    * @param accountId - owning Account.
    * @param sessionId - Session that holds the lock; a mismatch is ignored.
    * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+   * @param opts.onStopped - runs on the Account chain after this Session's slot is killed.
    */
   async stopExecutingSession(
     accountId: AccountId,
     sessionId: SessionId,
-    opts?: { skipIf?: () => boolean },
+    opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> },
   ): Promise<void> {
     return this.enqueueAccount(accountId, async () => {
       const slot = this.slots.get(accountId)
       if (slot === undefined || slot.sessionId !== sessionId) return
       if (opts?.skipIf?.() === true) return
       await this.killSlot(accountId)
+      await opts?.onStopped?.()
     })
   }
 
@@ -258,6 +278,7 @@ export class E2BRuntime extends Service {
   private async startExecutingSessionLocked(
     accountId: AccountId,
     sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
   ): Promise<ExecutingSessionStart> {
     if (this.disposed) throw new Error('E2B sandbox service is disposing')
     const existing = this.slots.get(accountId)
@@ -282,6 +303,13 @@ export class E2BRuntime extends Service {
         throw new Error('E2B sandbox service is disposing')
       }
       if (this.slots.get(accountId) === slot) slot.handle = created
+      try {
+        await opts?.onCreated?.()
+      } catch (error: unknown) {
+        if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
+        await this.killSandbox(created)
+        throw error
+      }
       return { sandbox: created, reused: false }
     } catch (error: unknown) {
       if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
@@ -348,6 +376,9 @@ export class E2BRuntime extends Service {
     }
     if (!Number.isFinite(this.config.timeoutMs) || this.config.timeoutMs <= 0) {
       throw new Error('dsh-e2b: timeoutMs must be a positive finite number')
+    }
+    if (!Number.isFinite(this.config.dailyCapMinutes) || this.config.dailyCapMinutes < 1) {
+      throw new Error('dsh-e2b: dailyCapMinutes must be a positive finite number')
     }
   }
 

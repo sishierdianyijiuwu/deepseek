@@ -89,6 +89,90 @@ interface SignInRow {
   expires_at: number | bigint
 }
 
+const MS_PER_UTC_DAY = 86_400_000
+
+function utcDayKey(at: number): string {
+  return new Date(at).toISOString().slice(0, 10)
+}
+
+function utcDayStartMs(day: string): number {
+  return Date.parse(`${day}T00:00:00.000Z`)
+}
+
+function overlapMs(from: number, to: number, day: string): number {
+  const start = Math.max(from, utcDayStartMs(day))
+  const end = Math.min(to, utcDayStartMs(day) + MS_PER_UTC_DAY)
+  return Math.max(0, end - start)
+}
+
+async function addExecutingWorldUsage(
+  sql: SqlClient,
+  accountId: string,
+  startedAt: number,
+  stoppedAt: number,
+): Promise<void> {
+  if (stoppedAt <= startedAt) return
+  let cursor = startedAt
+  while (cursor < stoppedAt) {
+    const day = utcDayKey(cursor)
+    const sliceEnd = Math.min(stoppedAt, utcDayStartMs(day) + MS_PER_UTC_DAY)
+    await sql.query(
+      `INSERT INTO executing_world_daily (account_id, utc_day, used_ms)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (account_id, utc_day)
+       DO UPDATE SET used_ms = executing_world_daily.used_ms + EXCLUDED.used_ms`,
+      [accountId, day, sliceEnd - cursor],
+    )
+    cursor = sliceEnd
+  }
+}
+
+async function closeOpenExecutingWorld(
+  sql: SqlClient,
+  accountId: string,
+  at: number,
+): Promise<void> {
+  const open = await sql.query(
+    'SELECT started_at FROM executing_world_open WHERE account_id = $1 FOR UPDATE',
+    [accountId],
+  )
+  const startedAt = open.rows[0]?.['started_at']
+  if (startedAt === undefined) return
+  await addExecutingWorldUsage(sql, accountId, Number(startedAt), at)
+  await sql.query('DELETE FROM executing_world_open WHERE account_id = $1', [accountId])
+}
+
+async function closeExecutingWorldInterval(
+  sql: SqlClient,
+  accountId: string,
+  startedAt: number,
+  at: number,
+): Promise<void> {
+  const open = await sql.query(
+    `SELECT started_at FROM executing_world_open
+     WHERE account_id = $1 AND started_at = $2 FOR UPDATE`,
+    [accountId, startedAt],
+  )
+  if (open.rows[0] === undefined) return
+  await addExecutingWorldUsage(sql, accountId, startedAt, at)
+  await sql.query(
+    'DELETE FROM executing_world_open WHERE account_id = $1 AND started_at = $2',
+    [accountId, startedAt],
+  )
+}
+
+async function closeAllOpenExecutingWorld(sql: SqlClient, at: number): Promise<void> {
+  await sql.transaction(async (tx) => {
+    const found = await tx.query(
+      'SELECT account_id, started_at FROM executing_world_open FOR UPDATE',
+    )
+    for (const row of found.rows) {
+      await addExecutingWorldUsage(tx, String(row['account_id']), Number(row['started_at']), at)
+    }
+    await tx.query('DELETE FROM executing_world_open')
+  })
+}
+
 /** PostgreSQL-backed Accounts (`ctx.accounts`). */
 export class PostgresAccounts extends Accounts {
   static inject = ['mailer']
@@ -160,6 +244,7 @@ export class PostgresAccounts extends Accounts {
       throw error
     }
     this.sql = sql
+    await closeAllOpenExecutingWorld(sql, Date.now())
     this.ctx.effect(() => () => {
       this.sql = undefined
       void sql.close()
@@ -486,7 +571,8 @@ export class PostgresAccounts extends Accounts {
   }
 
   /**
-   * Erase the Account row. Child token and Sign-in session rows CASCADE.
+   * Erase the Account row. Child token, Sign-in session, and executing-world
+   * usage rows CASCADE.
    * @param id - opaque Account id.
    * @returns `{ ok: true }` when the row was deleted, or `not_found`.
    */
@@ -571,6 +657,57 @@ export class PostgresAccounts extends Accounts {
       ],
     )
     return { id, ...entry }
+  }
+
+  /**
+   * Open a sandbox-running interval. A leftover open interval is closed at `at`.
+   * @param accountId - owning Account.
+   * @param at - interval start, milliseconds since Unix epoch.
+   * @returns `at`, the token later passed to {@link endExecutingWorld}.
+   */
+  override async beginExecutingWorld(accountId: AccountId, at: number): Promise<number> {
+    await this.client().transaction(async (sql) => {
+      await closeOpenExecutingWorld(sql, accountId, at)
+      await sql.query(
+        'INSERT INTO executing_world_open (account_id, started_at) VALUES ($1, $2)',
+        [accountId, at],
+      )
+    })
+    return at
+  }
+
+  /**
+   * Close the interval identified by `startedAt` and charge overlapped UTC days.
+   * @param accountId - owning Account.
+   * @param startedAt - token returned by {@link beginExecutingWorld}.
+   * @param at - interval end, milliseconds since Unix epoch.
+   */
+  override async endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void> {
+    await this.client().transaction(async sql =>
+      closeExecutingWorldInterval(sql, accountId, startedAt, at),
+    )
+  }
+
+  /**
+   * Sandbox-running milliseconds on the UTC day containing `at`.
+   * @param accountId - owning Account.
+   * @param at - instant whose UTC day is queried, milliseconds since Unix epoch.
+   * @returns milliseconds used on that UTC day.
+   */
+  override async executingWorldUsedMs(accountId: AccountId, at: number): Promise<number> {
+    const day = utcDayKey(at)
+    const daily = await this.client().query(
+      'SELECT used_ms FROM executing_world_daily WHERE account_id = $1 AND utc_day = $2',
+      [accountId, day],
+    )
+    const open = await this.client().query(
+      'SELECT started_at FROM executing_world_open WHERE account_id = $1',
+      [accountId],
+    )
+    let used = Number(daily.rows[0]?.['used_ms'] ?? 0)
+    const startedAt = open.rows[0]?.['started_at']
+    if (startedAt !== undefined) used += overlapMs(Number(startedAt), at, day)
+    return used
   }
 
   /**

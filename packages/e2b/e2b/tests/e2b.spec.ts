@@ -111,6 +111,7 @@ describe('E2BRuntime', () => {
     const started = await ctx.e2b.startExecutingSession(accountId('a'), SessionId('s'))
     expect(started).toEqual({ sandbox: fixture.sandbox, reused: true })
     expect(ctx.e2b.perExecutingSession).toBe(false)
+    expect(ctx.e2b.dailyCapMinutes).toBe(60)
     expect(ctx.e2b.executingSessionId(accountId('a'))).toBeUndefined()
     await fiber.dispose()
   })
@@ -228,6 +229,7 @@ describe('E2BRuntime', () => {
     [{ apiKey: '' }, /configure apiKey/],
     [{ apiKey: 'x', cwd: 'relative' }, /absolute Linux path/],
     [{ apiKey: 'x', timeoutMs: 0 }, /positive finite/],
+    [{ apiKey: 'x', dailyCapMinutes: 0 }, /dailyCapMinutes must be a positive finite/],
   ] as const)('fails self-contained configuration before opening E2B: %j', async (config, message) => {
     vi.stubEnv('E2B_API_KEY', '')
     const ctx = new Context()
@@ -292,6 +294,48 @@ describe('E2BRuntime', () => {
     await expect(ctx.e2b.getSandbox()).resolves.toBe(second.sandbox)
     await fiber.dispose()
     expect(second.kill).toHaveBeenCalledOnce()
+  })
+
+  it('runs onCreated and onStopped on the Account chain for a new Executing Session', async () => {
+    const fixture = fakeSandbox('hook-1')
+    sdk.create.mockResolvedValue(fixture.sandbox)
+    const ctx = new Context()
+    const account = accountId('account-hooks')
+    const fiber = await ctx.plugin(E2BRuntime, { apiKey: 'test-key', perExecutingSession: true })
+    const order: string[] = []
+    const started = await ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: async () => { order.push('created') },
+    })
+    expect(started.reused).toBe(false)
+    expect(order).toEqual(['created'])
+    await ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: async () => { order.push('reused-created') },
+    })
+    expect(order).toEqual(['created'])
+    await ctx.e2b.stopExecutingSession(account, SessionId('s1'), {
+      onStopped: async () => { order.push('stopped') },
+    })
+    expect(order).toEqual(['created', 'stopped'])
+    expect(fixture.kill).toHaveBeenCalledOnce()
+    await ctx.e2b.stopExecutingSession(account, SessionId('s1'), {
+      onStopped: async () => { order.push('stopped-again') },
+    })
+    expect(order).toEqual(['created', 'stopped'])
+    await fiber.dispose()
+  })
+
+  it('kills a new sandbox when onCreated throws', async () => {
+    const fixture = fakeSandbox('hook-fail')
+    sdk.create.mockResolvedValue(fixture.sandbox)
+    const ctx = new Context()
+    const account = accountId('account-hooks-fail')
+    const fiber = await ctx.plugin(E2BRuntime, { apiKey: 'test-key', perExecutingSession: true })
+    await expect(ctx.e2b.startExecutingSession(account, SessionId('s1'), {
+      onCreated: () => Promise.reject(new Error('begin failed')),
+    })).rejects.toThrow('begin failed')
+    expect(ctx.e2b.executingSessionId(account)).toBeUndefined()
+    expect(fixture.kill).toHaveBeenCalledOnce()
+    await fiber.dispose()
   })
 
   it('routes getSandbox through the initiating Account and ignores a missing stop', async () => {

@@ -260,16 +260,55 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.e2b` — `E2BRuntime`
 
-Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction; adapters await getSandbox before their first operation.
+Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction unless `perExecutingSession` is set, in which case startExecutingSession creates one sandbox per Account. Adapters await getSandbox before their first operation. The platform API key is never installed in a sandbox.
 
 ```ts cordis-catalog
 /**
- * Return the shared live SDK handle.
+ * Return the live SDK handle for this caller.
+ * Process-wide mode returns the construction-time sandbox. Per-Executing-Session
+ * mode returns the Account's sandbox from the initiating Agent.
  * @returns the created sandbox after the configured cwd exists.
- * @throws when E2B rejects creation or the service is disposing.
+ * @throws when E2B rejects creation, the service is disposing, or no Executing Session is active.
  */
 async getSandbox(): Promise<Sandbox>
+
+/**
+ * Create or reuse this Account's Executing Session sandbox.
+ * @param accountId - owning Account.
+ * @param sessionId - Session that holds the one-executing-session lock.
+ * @param opts.onCreated - runs on the Account chain after a new sandbox is live.
+ * @returns the live sandbox and whether this call reused an existing slot.
+ * @throws {@link ExecutingSessionBusyError} when another Session holds the lock.
+ */
+async startExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { onCreated?: () => Promise<void> }, ): Promise<ExecutingSessionStart>
+
+/**
+ * Copy-back callers then kill this Account's sandbox. The durable Workspace
+ * is not deleted. Missing or already-expired sandboxes are quiescence.
+ * @param accountId - owning Account.
+ * @param sessionId - Session that holds the lock; a mismatch is ignored.
+ * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+ * @param opts.onStopped - runs on the Account chain after this Session's slot is killed.
+ */
+async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> }, ): Promise<void>
+
+/**
+ * The Session that currently holds this Account's Executing Session lock.
+ * @param accountId - owning Account.
+ * @returns the locked Session id, or `undefined`.
+ */
+executingSessionId(accountId: AccountId): SessionId | undefined
+
+/**
+ * Resolved live sandbox for this Account, if setup finished.
+ * Host copy-back waiters compare this object with the handle they bound.
+ * @param accountId - owning Account.
+ * @returns the live sandbox, or `undefined`.
+ */
+executingSandbox(accountId: AccountId): Sandbox | undefined
 ```
+
+Types: [SessionId](core.zh.md)
 
 Source: [`packages/e2b/e2b/src/index.ts`](../../packages/e2b/e2b/src/index.ts)
 

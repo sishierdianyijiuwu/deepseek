@@ -175,8 +175,9 @@ export abstract class Accounts extends Service {
 
   /**
    * Erase this Account row and CASCADE Sign-in sessions, verification tokens,
-   * and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions,
-   * Workspaces, and Credentials before calling this. Unknown ids are `not_found`.
+   * password-reset tokens, and executing-world usage rows. Does not Ban. The
+   * HTTP Consumer erases Sessions, Workspaces, and Credentials before calling
+   * this. Unknown ids are `not_found`.
    * @param id - opaque Account id of the signed-in caller.
    * @returns `{ ok: true }` when the row was deleted, or `not_found`.
    */
@@ -225,6 +226,34 @@ export abstract class Accounts extends Service {
    * @returns every audit row.
    */
   abstract listOperatorAccess(): Promise<OperatorAuditRecord[]>
+
+  /**
+   * Open a sandbox-running interval for this Account. A leftover open interval
+   * is closed at `at` first. Does not enforce the daily cap.
+   * @param accountId - owning Account.
+   * @param at - interval start, milliseconds since Unix epoch.
+   * @returns `at`, the token later passed to {@link endExecutingWorld}.
+   */
+  abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<number>
+
+  /**
+   * Close the sandbox-running interval identified by `startedAt` and add the
+   * elapsed time to each overlapped UTC day. A missing or already-replaced
+   * interval is a no-op.
+   * @param accountId - owning Account.
+   * @param startedAt - token returned by {@link beginExecutingWorld}.
+   * @param at - interval end, milliseconds since Unix epoch.
+   */
+  abstract endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void>
+
+  /**
+   * Sandbox-running milliseconds already charged to this Account on the UTC
+   * day that contains `at`, including a still-open interval.
+   * @param accountId - owning Account.
+   * @param at - instant whose UTC day is queried, milliseconds since Unix epoch.
+   * @returns milliseconds used on that UTC day.
+   */
+  abstract executingWorldUsedMs(accountId: AccountId, at: number): Promise<number>
 }
 
 export default Accounts

@@ -1,14 +1,14 @@
 /**
  * REAL-composition coverage: Sign-in cookie jars against Host `/api` with the
- * E2B SDK faked. Hydrate, copy-back, the 1 GiB cap, and one Executing Session
- * are observed as HTTP status and RPC bodies.
+ * E2B SDK faked. Hydrate, copy-back, the 1 GiB cap, one Executing Session,
+ * and the daily E2B minute cap are observed as HTTP status and RPC bodies.
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -97,10 +97,12 @@ function createRemoteWorld(): {
 let root: string | undefined
 let context: Context | undefined
 const idleGates = new Map<string, PromiseWithResolvers<undefined>>()
+const idleSettled = new Set<string>()
 const mailbox: MailMessage[] = []
 let currentWorld: ReturnType<typeof createRemoteWorld> | undefined
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   const e2b = context?.get('e2b')
   if (e2b instanceof FakeE2B) {
     e2b.startEnqueued?.resolve(undefined)
@@ -113,6 +115,7 @@ afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
   idleGates.clear()
+  idleSettled.clear()
   mailbox.length = 0
   currentWorld = undefined
 })
@@ -152,10 +155,15 @@ class FakeCredentials extends Service {
   hasStoredSecret(): Promise<boolean> {
     return Promise.resolve(true)
   }
+
+  set(): Promise<void> {
+    return Promise.resolve()
+  }
 }
 
 class FakeE2B extends Service {
   readonly perExecutingSession = true
+  readonly dailyCapMinutes = 60
   readonly cwd = '/home/user/workspace'
   private readonly accountSlots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
   private chain: Promise<unknown> = Promise.resolve()
@@ -178,7 +186,11 @@ class FakeE2B extends Service {
     return run
   }
 
-  async startExecutingSession(accountId: AccountId, sessionId: SessionId) {
+  async startExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ) {
     this.startEnqueued?.resolve(undefined)
     return this.enqueue(async () => {
       const existing = this.accountSlots.get(accountId)
@@ -190,6 +202,7 @@ class FakeE2B extends Service {
       if (!reused) world.created += 1
       this.accountSlots.set(accountId, { sessionId, world })
       currentWorld = world
+      if (!reused) await opts?.onCreated?.()
       return { sandbox: world.world, reused }
     })
   }
@@ -197,7 +210,7 @@ class FakeE2B extends Service {
   async stopExecutingSession(
     accountId: AccountId,
     sessionId: SessionId,
-    opts?: { skipIf?: () => boolean },
+    opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> },
   ): Promise<void> {
     return this.enqueue(async () => {
       const barrier = this.stopBarrier
@@ -210,6 +223,7 @@ class FakeE2B extends Service {
       if (existing?.sessionId === sessionId) {
         existing.world.killed = true
         this.accountSlots.delete(accountId)
+        await opts?.onStopped?.()
       }
       if (barrier?.afterDelete === true) {
         barrier.entered.resolve(undefined)
@@ -229,6 +243,10 @@ class FakeE2B extends Service {
   killLiveSlots(): void {
     for (const existing of this.accountSlots.values()) existing.world.killed = true
     this.accountSlots.clear()
+  }
+
+  hasLiveSlot(): boolean {
+    return this.accountSlots.size > 0
   }
 }
 
@@ -252,8 +270,17 @@ class IsolatedApiProxy extends Service {
         const agentCtx = ownerCtx.extend({ agent })
         const idle = Promise.withResolvers<undefined>()
         idleGates.set(session.id, idle)
+        void idle.promise.then(() => { idleSettled.add(session.id) })
         const live = {
           status: 'idle' as 'idle' | 'running',
+        }
+        const beginTurn = (): void => {
+          live.status = 'running'
+          if (!idleSettled.has(session.id)) return
+          idleSettled.delete(session.id)
+          const next = Promise.withResolvers<undefined>()
+          idleGates.set(session.id, next)
+          void next.promise.then(() => { idleSettled.add(session.id) })
         }
         Object.assign(agent, {
           id: session.id,
@@ -261,9 +288,12 @@ class IsolatedApiProxy extends Service {
           ctx: agentCtx,
           inbox: { nextTurn: [], nextStep: [] },
           cancel: () => undefined,
-          followup: () => { live.status = 'running' },
-          steer: () => { live.status = 'running' },
-          whenIdle: () => idle.promise.then(() => { live.status = 'idle' }),
+          followup: beginTurn,
+          steer: beginTurn,
+          whenIdle: () => {
+            const gate = idleGates.get(session.id)
+            return (gate?.promise ?? Promise.resolve()).then(() => { live.status = 'idle' })
+          },
         })
         Object.defineProperty(agent, 'status', {
           get: () => live.status,
@@ -653,12 +683,193 @@ describe('E2B Executing Session over HTTP', () => {
     const hydrated = currentWorld?.remote.get('/home/user/workspace/out.txt')
     expect(hydrated).toBeDefined()
     expect(Buffer.from(hydrated?.data ?? new Uint8Array()).toString()).toBe('new')
-    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
+    await expect.poll(() => e2b.hasLiveSlot() && currentWorld?.killed === false).toBe(true)
     const history = await rpc(harness, jar, 'session.history', { sessionId })
     const events = (history.body as {
       result?: { value?: { events?: Array<{ event?: { type?: string } }> } }
     }).result?.value?.events ?? []
     expect(events.some(entry => entry.event?.type === 'workspace/copy-back-failed')).toBe(false)
+    expect(e2b.hasLiveSlot()).toBe(true)
+    expect(currentWorld?.killed).toBe(false)
     if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+    await expect.poll(() => currentWorld?.killed === true || !e2b.hasLiveSlot()).toBe(true)
+  })
+
+  it('refuses a new Executing Session after 60 minutes and still allows sign-in, history, and Credentials', {
+    timeout: 60_000,
+  }, async () => {
+    let nowMs = Date.parse('2026-03-01T22:00:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'daily-cap@example.com'
+    const jar = await signInAccount(harness, email, password)
+    const jarTab = await signInAccount(harness, email, password)
+
+    const workspace = await rpc(harness, jar, 'workspace.create', { title: 'Cap' })
+    const workspaceId = (workspace.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    expect((await rpc(harness, jar, 'workspace.write', {
+      workspaceId, path: 'note.txt', data: 'hello',
+    })).status).toBe(200)
+    const sessionA = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionAId = (sessionA.body as { result?: { value?: { sessionId?: string } } })
+      .result?.value?.sessionId
+    const sessionB = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionBId = (sessionB.body as { result?: { value?: { sessionId?: string } } })
+      .result?.value?.sessionId
+    expect(sessionAId).toEqual(expect.any(String))
+    expect(sessionBId).toEqual(expect.any(String))
+
+    const historyIdle = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyIdle.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialIdle = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-before',
+    })
+    expect((credentialIdle.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const promptA = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'run' }],
+    })
+    expect((promptA.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const historyLive = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyLive.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialLive = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-during',
+    })
+    expect((credentialLive.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs += 60 * 60 * 1000
+    const liveAgain = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'still-live' }],
+    })
+    expect((liveAgain.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const liveTab = await rpc(harness, jarTab, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'tab' }],
+    })
+    expect((liveTab.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    if (sessionAId !== undefined) idleGates.get(sessionAId)?.resolve(undefined)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    await expect.poll(() => e2b.hasLiveSlot()).toBe(false)
+
+    const exhaustedSame = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again-a' }],
+    })
+    expect(rpcError(exhaustedSame.body)).toBe('e2b-cap-exhausted')
+    const exhausted = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again' }],
+    })
+    expect(rpcError(exhausted.body)).toBe('e2b-cap-exhausted')
+    const exhaustedDetails = (exhausted.body as {
+      result?: { error?: { details?: { capMinutes?: number; resetsAt?: number } } }
+    }).result?.error?.details
+    expect(exhaustedDetails?.capMinutes).toBe(60)
+    expect(exhaustedDetails?.resetsAt).toBe(Date.parse('2026-03-02T00:00:00.000Z'))
+
+    const historyAfter = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyAfter.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialAfter = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-after',
+    })
+    expect((credentialAfter.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const signedOut = await raw(harness, jar, '/auth/sign-out', { method: 'POST' })
+    expect(signedOut.status).toBe(200)
+    const jarAgain = new CookieJar()
+    const signedIn = await raw(harness, jarAgain, '/auth/sign-in', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })
+    expect(signedIn.status).toBe(200)
+    expect(jarAgain.header()).toContain(SIGN_IN_COOKIE)
+    const historySignedIn = await rpc(harness, jarAgain, 'session.history', { sessionId: sessionAId })
+    expect((historySignedIn.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs = Date.parse('2026-03-02T00:00:00.000Z')
+    const nextDay = await rpc(harness, jarAgain, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'tomorrow' }],
+    })
+    expect((nextDay.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
+  })
+
+  it('charges a replacement Executing Session that starts in the previous stop window', {
+    timeout: 60_000,
+  }, async () => {
+    let nowMs = Date.parse('2026-04-01T10:00:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const harness = await boot()
+    const jar = await signInAccount(harness, 'race-cap@example.com', 'correct-horse')
+    const created = await rpc(harness, jar, 'workspace.create', { title: 'Race' })
+    const workspaceId = (created.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    await rpc(harness, jar, 'workspace.write', { workspaceId, path: 'note.txt', data: 'hello' })
+    const sessionA = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionB = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionC = (await rpc(harness, jar, 'session.create', { workspaceId }))
+      .body as { result?: { value?: { sessionId?: string } } }
+    const sessionAId = sessionA.result?.value?.sessionId
+    const sessionBId = sessionB.result?.value?.sessionId
+    const sessionCId = sessionC.result?.value?.sessionId
+
+    expect((await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'a' }],
+    })).status).toBe(200)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    e2b.stopBarrier = {
+      entered: Promise.withResolvers<undefined>(),
+      hold: Promise.withResolvers<undefined>(),
+      afterDelete: false,
+    }
+    if (sessionAId !== undefined) idleGates.get(sessionAId)?.resolve(undefined)
+    await e2b.stopBarrier.entered.promise
+    e2b.startEnqueued = Promise.withResolvers<undefined>()
+    const promptBPromise = rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'b' }],
+    })
+    await e2b.startEnqueued.promise
+    e2b.stopBarrier.hold.resolve(undefined)
+    const promptB = await promptBPromise
+    expect((promptB.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs += 60 * 60 * 1000
+    if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
+    await expect.poll(() => e2b.hasLiveSlot()).toBe(false)
+    const exhausted = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionCId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'c' }],
+    })
+    expect(rpcError(exhausted.body)).toBe('e2b-cap-exhausted')
   })
 })

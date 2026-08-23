@@ -6,7 +6,7 @@
 import type { SqlClient } from './sql.ts'
 
 /** Monotonic schema version stored in `account_schema`. */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 const DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS account_schema (
@@ -48,6 +48,16 @@ const DDL: readonly string[] = [
   target_account_id TEXT NOT NULL,
   session_id TEXT,
   opened_at BIGINT NOT NULL
+)`,
+  `CREATE TABLE IF NOT EXISTS executing_world_daily (
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  utc_day TEXT NOT NULL,
+  used_ms BIGINT NOT NULL CHECK (used_ms >= 0),
+  PRIMARY KEY (account_id, utc_day)
+)`,
+  `CREATE TABLE IF NOT EXISTS executing_world_open (
+  account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  started_at BIGINT NOT NULL
 )`,
 ]
 

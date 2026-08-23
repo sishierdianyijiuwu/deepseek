@@ -91,6 +91,9 @@ describe('rpcErrorSchema', () => {
     expect(rpcErrorSchema.parse({
       code: 'executing-session-busy', message: 'm', details: { sessionId: 's' },
     }).code).toBe('executing-session-busy')
+    expect(rpcErrorSchema.parse({
+      code: 'e2b-cap-exhausted', message: 'm', details: { capMinutes: 60, resetsAt: 1 },
+    }).code).toBe('e2b-cap-exhausted')
     expect(rpcErrorSchema.parse({ code: 'operator-access-readonly', message: 'm', details: {} }).code)
       .toBe('operator-access-readonly')
     expect(rpcErrorSchema.parse({ code: 'internal', message: 'm', details: {} }).code).toBe('internal')

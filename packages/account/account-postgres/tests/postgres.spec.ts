@@ -45,7 +45,7 @@ describe('sql adapter', () => {
     const sql = await openSql('pglite:')
     await ensureSchema(sql)
     await ensureSchema(sql)
-    expect(SCHEMA_VERSION).toBe(4)
+    expect(SCHEMA_VERSION).toBe(5)
     const nested = await sql.transaction(async (inner) => {
       await inner.close()
       await inner.transaction(async nestedInner => nestedInner.query('SELECT 1 AS x'))
@@ -292,6 +292,114 @@ describe('postgres accounts', () => {
     await expect(ctx.accounts.register('late@example.com', 'password12'))
       .resolves.toEqual({ ok: false, error: 'registration_frozen' })
     await ctx.fiber.dispose()
+  })
+
+  it('charges sandbox-running intervals per UTC day and ignores a missing end', {
+    timeout: 30_000,
+  }, async () => {
+    mailbox.length = 0
+    const nowMs = Date.parse('2026-01-01T23:30:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+    }).await()
+    const accounts = ctx.accounts
+    await accounts.register('cap@example.com', 'password12')
+    const token = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(token).toBeDefined()
+    await accounts.verifyEmail(token!)
+    const owner = await accounts.lookupByEmail('cap@example.com')
+    expect(owner).toBeDefined()
+    const id = owner!.accountId
+
+    expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
+    await accounts.endExecutingWorld(id, nowMs, nowMs)
+    expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
+
+    await expect(accounts.beginExecutingWorld(id, nowMs)).resolves.toBe(nowMs)
+    expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(0)
+    const nextDay = Date.parse('2026-01-02T00:30:00.000Z')
+    expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
+    await accounts.endExecutingWorld(id, nowMs, nextDay)
+    expect(await accounts.executingWorldUsedMs(id, nowMs)).toBe(30 * 60_000)
+    expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
+
+    await accounts.beginExecutingWorld(id, nextDay)
+    await accounts.endExecutingWorld(id, nextDay, nextDay - 1)
+    expect(await accounts.executingWorldUsedMs(id, nextDay)).toBe(30 * 60_000)
+
+    await accounts.beginExecutingWorld(id, nextDay)
+    const later = nextDay + 10_000
+    await accounts.beginExecutingWorld(id, later)
+    expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 10_000)
+    await accounts.endExecutingWorld(id, nextDay, later + 5_000)
+    expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 10_000)
+    await accounts.endExecutingWorld(id, later, later + 5_000)
+    expect(await accounts.executingWorldUsedMs(id, later)).toBe(30 * 60_000 + 15_000)
+
+    await expect(accounts.deleteAccount(id)).resolves.toEqual({ ok: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('closes leftover open intervals when the provider starts', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-e2b-cap-'))
+    let nowMs = Date.parse('2026-01-15T12:00:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const url = `pglite:${dir}`
+    const first = new Context()
+    await first.plugin(SilentMailer).await()
+    await first.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    await first.accounts.register('cap@example.com', 'password12')
+    const token = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(token).toBeDefined()
+    await first.accounts.verifyEmail(token!)
+    const owner = await first.accounts.lookupByEmail('cap@example.com')
+    expect(owner).toBeDefined()
+    await first.accounts.beginExecutingWorld(owner!.accountId, nowMs)
+    await first.fiber.dispose()
+
+    nowMs += 12_000
+    const second = new Context()
+    await second.plugin(SilentMailer).await()
+    await second.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    expect(await second.accounts.executingWorldUsedMs(owner!.accountId, nowMs)).toBe(12_000)
+    await second.fiber.dispose()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('splits a leftover open interval across UTC midnight on provider start', {
+    timeout: 30_000,
+  }, async () => {
+    mailbox.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-e2b-cap-midnight-'))
+    let nowMs = Date.parse('2026-01-01T23:30:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const url = `pglite:${dir}`
+    const first = new Context()
+    await first.plugin(SilentMailer).await()
+    await first.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    await first.accounts.register('cap@example.com', 'password12')
+    const token = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(token).toBeDefined()
+    await first.accounts.verifyEmail(token!)
+    const owner = await first.accounts.lookupByEmail('cap@example.com')
+    expect(owner).toBeDefined()
+    await first.accounts.beginExecutingWorld(owner!.accountId, nowMs)
+    await first.fiber.dispose()
+
+    nowMs = Date.parse('2026-01-02T00:30:00.000Z')
+    const second = new Context()
+    await second.plugin(SilentMailer).await()
+    await second.plugin(PostgresAccounts, { url, publicBaseUrl: 'http://example.test' }).await()
+    expect(await second.accounts.executingWorldUsedMs(owner!.accountId, Date.parse('2026-01-01T23:59:00.000Z')))
+      .toBe(30 * 60_000)
+    expect(await second.accounts.executingWorldUsedMs(owner!.accountId, nowMs)).toBe(30 * 60_000)
+    await second.fiber.dispose()
+    await rm(dir, { recursive: true, force: true })
   })
 })
 

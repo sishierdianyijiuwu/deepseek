@@ -20,7 +20,7 @@
   name: '@deepseek-ai/dsh-fs-e2b'
 ```
 
-`apiKey` 可省略；省略时读取 `E2B_API_KEY`。该密钥只配置宿主 SDK 连接，绝不会安装进沙箱。`cwd` 默认为 `/home/user/workspace`，并且必须是绝对 POSIX 路径。`timeoutMs` 默认为 5 分钟并控制沙箱生命周期；超时会删除沙箱。`perExecutingSession`（默认 false）按 Account 的 Executing Session 创建沙箱，而不是进程级单沙箱；在 `stopExecutingSession` 之前，第二个 Session 会以 `ExecutingSessionBusyError` 被拒绝。`startExecutingSession` 返回 `{ sandbox, reused }`。`executingSandbox` 是 Host waiter 用来比较的仍存活句柄。沙箱过期不会删除持久 Workspace。
+`apiKey` 可省略；省略时读取 `E2B_API_KEY`。该密钥只配置宿主 SDK 连接，绝不会安装进沙箱。`cwd` 默认为 `/home/user/workspace`，并且必须是绝对 POSIX 路径。`timeoutMs` 默认为 5 分钟并控制沙箱生命周期；超时会删除沙箱。`perExecutingSession`（默认 false）按 Account 的 Executing Session 创建沙箱，而不是进程级单沙箱；在 `stopExecutingSession` 之前，第二个 Session 会以 `ExecutingSessionBusyError` 被拒绝。`dailyCapMinutes`（默认 60）是托管模式下每个 Account 每个 UTC 日的沙箱运行上限；组合了 `ctx.accounts` 时由 Host 的 `session.prompt` / `subagent.prompt` 执行该上限。`startExecutingSession` / `stopExecutingSession` 在 per-Account 链上运行 `onCreated` / `onStopped`。`startExecutingSession` 返回 `{ sandbox, reused }`。`executingSandbox` 是 Host waiter 用来比较的仍存活句柄。沙箱过期不会删除持久 Workspace。
 
 ## 生命周期与所有权
 

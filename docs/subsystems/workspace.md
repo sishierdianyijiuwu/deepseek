@@ -233,6 +233,25 @@ async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[
 async readFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, ): Promise<Uint8Array>
 
 /**
+ * Copy this Account's durable Workspace files into an execution-world cwd.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param world - execution-world filesystem (the E2B sandbox).
+ * @param remoteCwd - absolute sandbox working directory.
+ */
+async hydrateInto( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>
+
+/**
+ * Replace the durable Workspace with the execution-world tree, refusing a
+ * copy past 1 GiB without growing the durable copy.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param world - execution-world filesystem (the E2B sandbox).
+ * @param remoteCwd - absolute sandbox working directory.
+ */
+async copyBackFrom( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>
+
+/**
  * Persist a new display title on the PostgreSQL row after the registry write.
  * @param accountId - owning Account.
  * @param workspaceId - Host Workspace id.

@@ -145,7 +145,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract deleteAccount(id: AccountId): Promise<DeleteResult>',
-        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials before calling this. Unknown ids are `not_found`.',
+        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, password-reset tokens, and executing-world usage rows. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials before calling this. Unknown ids are `not_found`.',
         parameters: [{ name: 'id', description: 'opaque Account id of the signed-in caller.' }],
         returns: '`{ ok: true }` when the row was deleted, or `not_found`.',
       },
@@ -183,6 +183,23 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'List Operator-access openings, newest first.',
         parameters: [],
         returns: 'every audit row.',
+      },
+      {
+        signature: 'abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<number>',
+        description: 'Open a sandbox-running interval for this Account. A leftover open interval is closed at `at` first. Does not enforce the daily cap.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'interval start, milliseconds since Unix epoch.' }],
+        returns: '`at`, the token later passed to {@link endExecutingWorld}.',
+      },
+      {
+        signature: 'abstract endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void>',
+        description: 'Close the sandbox-running interval identified by `startedAt` and add the elapsed time to each overlapped UTC day. A missing or already-replaced interval is a no-op.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'startedAt', description: 'token returned by {@link beginExecutingWorld}.' }, { name: 'at', description: 'interval end, milliseconds since Unix epoch.' }],
+      },
+      {
+        signature: 'abstract executingWorldUsedMs(accountId: AccountId, at: number): Promise<number>',
+        description: 'Sandbox-running milliseconds already charged to this Account on the UTC day that contains `at`, including a still-open interval.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'instant whose UTC day is queried, milliseconds since Unix epoch.' }],
+        returns: 'milliseconds used on that UTC day.',
       },
     ],
   },
@@ -707,6 +724,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'file bytes.',
       },
       {
+        signature: 'async hydrateInto( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>',
+        description: 'Copy this Account\'s durable Workspace files into an execution-world cwd.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'world', description: 'execution-world filesystem (the E2B sandbox).' }, { name: 'remoteCwd', description: 'absolute sandbox working directory.' }],
+      },
+      {
+        signature: 'async copyBackFrom( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>',
+        description: 'Replace the durable Workspace with the execution-world tree, refusing a copy past 1 GiB without growing the durable copy.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'world', description: 'execution-world filesystem (the E2B sandbox).' }, { name: 'remoteCwd', description: 'absolute sandbox working directory.' }],
+      },
+      {
         signature: 'async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void>',
         description: 'Persist a new display title on the PostgreSQL row after the registry write.',
         parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'title', description: 'new title.' }],
@@ -879,7 +906,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'e2b',
     summary: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal.',
-    description: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction; adapters await getSandbox before their first operation.',
+    description: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction unless `perExecutingSession` is set, in which case startExecutingSession creates one sandbox per Account. Adapters await getSandbox before their first operation. The platform API key is never installed in a sandbox.',
     methods: [
       {
         signature: 'readonly cwd: string',
@@ -892,11 +919,45 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'readonly perExecutingSession: boolean',
+        description: 'Whether sandboxes are created per Executing Session instead of process-wide.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly dailyCapMinutes: number',
+        description: 'Minutes of sandbox-running time each Account may use per UTC day.',
+        parameters: [],
+      },
+      {
         signature: 'async getSandbox(): Promise<Sandbox>',
-        description: 'Return the shared live SDK handle.',
+        description: 'Return the live SDK handle for this caller. Process-wide mode returns the construction-time sandbox. Per-Executing-Session mode returns the Account\'s sandbox from the initiating Agent.',
         parameters: [],
         returns: 'the created sandbox after the configured cwd exists.',
-        throws: ['when E2B rejects creation or the service is disposing.'],
+        throws: ['when E2B rejects creation, the service is disposing, or no Executing Session is active.'],
+      },
+      {
+        signature: 'async startExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { onCreated?: () => Promise<void> }, ): Promise<ExecutingSessionStart>',
+        description: 'Create or reuse this Account\'s Executing Session sandbox.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the one-executing-session lock.' }, { name: 'opts', description: '.onCreated - runs on the Account chain after a new sandbox is live.' }],
+        returns: 'the live sandbox and whether this call reused an existing slot.',
+        throws: ['{@link ExecutingSessionBusyError} when another Session holds the lock.'],
+      },
+      {
+        signature: 'async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> }, ): Promise<void>',
+        description: 'Copy-back callers then kill this Account\'s sandbox. The durable Workspace is not deleted. Missing or already-expired sandboxes are quiescence.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the lock; a mismatch is ignored.' }, { name: 'opts', description: '.onStopped - runs on the Account chain after this Session\'s slot is killed.' }],
+      },
+      {
+        signature: 'executingSessionId(accountId: AccountId): SessionId | undefined',
+        description: 'The Session that currently holds this Account\'s Executing Session lock.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'the locked Session id, or `undefined`.',
+      },
+      {
+        signature: 'executingSandbox(accountId: AccountId): Sandbox | undefined',
+        description: 'Resolved live sandbox for this Account, if setup finished. Host copy-back waiters compare this object with the handle they bound.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'the live sandbox, or `undefined`.',
       },
     ],
   },
@@ -3555,6 +3616,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
+  },
+  {
+    name: 'ExecutingSessionStart',
+    declaration: 'export interface ExecutingSessionStart {\n    readonly sandbox: Sandbox;\n    readonly reused: boolean;\n}',
+  },
+  {
+    name: 'ExecutionWorld',
+    declaration: 'export interface ExecutionWorld {\n    files: ExecutionWorldFiles;\n}',
+  },
+  {
+    name: 'ExecutionWorldEntry',
+    declaration: 'export interface ExecutionWorldEntry {\n    path: string;\n    name: string;\n    type?: unknown;\n    size?: number;\n    symlinkTarget?: string;\n}',
+  },
+  {
+    name: 'ExecutionWorldFiles',
+    declaration: 'export interface ExecutionWorldFiles {\n    makeDir(path: string): Promise<unknown>;\n    write(path: string, data: string | Uint8Array | ArrayBuffer): Promise<unknown>;\n    read(path: string, opts: {\n        format: \'bytes\';\n    }): Promise<Uint8Array>;\n    list(path: string, opts: {\n        depth: number;\n    }): Promise<readonly ExecutionWorldEntry[]>;\n}',
   },
   {
     name: 'FileDiff',

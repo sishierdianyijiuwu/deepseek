@@ -79,6 +79,8 @@ export interface RpcErrorDetailsMap {
   'credential-missing': {}
   /** Hosted `session.prompt` when another Executing Session already holds this Account's sandbox. */
   'executing-session-busy': { sessionId: SessionId }
+  /** Hosted `session.prompt` when this Account has used its daily execution-world minutes. */
+  'e2b-cap-exhausted': { capMinutes: number; resetsAt: number }
   /** Hosted Operator access refused a prompt, mutation, respond, or Credential secret read. */
   'operator-access-readonly': {}
   /**
