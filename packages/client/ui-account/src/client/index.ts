@@ -30,7 +30,7 @@ export type AuthResult =
 /** Current Sign-in session as `/auth/me` reports it. */
 export type MeResult =
   | { ok: true; signedIn: false }
-  | { ok: true; signedIn: true; email: string }
+  | { ok: true; signedIn: true; email: string; operator: boolean }
 
 /** Injected business face of the account overlay. */
 export interface AccountGateInjected {

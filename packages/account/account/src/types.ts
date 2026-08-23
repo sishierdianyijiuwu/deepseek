@@ -14,7 +14,7 @@ export type SignInSessionId = Branded<'SignInSessionId'>
 /** Outcome of {@link import('./index.ts').Accounts.register}. */
 export type RegisterResult =
   | { ok: true }
-  | { ok: false; error: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed' }
+  | { ok: false; error: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed' | 'registration_frozen' }
 
 /** Outcome of {@link import('./index.ts').Accounts.verifyEmail}. */
 export type VerifyEmailResult =
@@ -24,7 +24,12 @@ export type VerifyEmailResult =
 /** Outcome of {@link import('./index.ts').Accounts.signIn}. */
 export type SignInResult =
   | { ok: true; signInId: SignInSessionId; expiresAt: number }
-  | { ok: false; error: 'invalid_credentials' | 'unverified' }
+  | { ok: false; error: 'invalid_credentials' | 'unverified' | 'banned' }
+
+/** Outcome of {@link import('./index.ts').Accounts.ban} and {@link import('./index.ts').Accounts.liftBan}. */
+export type BanResult =
+  | { ok: true }
+  | { ok: false; error: 'invalid_email' | 'not_found' }
 
 /** Outcome of {@link import('./index.ts').Accounts.resetPassword}. */
 export type ResetPasswordResult =
@@ -39,6 +44,8 @@ export interface SignInLookup {
   email: string
   /** Epoch-ms expiry of this Sign-in session after the latest slide. */
   expiresAt: number
+  /** True when `email` is on the host operator list. */
+  operator: boolean
 }
 
 /** A verification message the mailer delivers. */

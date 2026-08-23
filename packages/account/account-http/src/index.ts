@@ -7,7 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SIGN_IN_COOKIE, cookieValue, signInSessionId } from '@deepseek-ai/dsh-account'
-import type { Accounts } from '@deepseek-ai/dsh-account'
+import type { Accounts, SignInLookup } from '@deepseek-ai/dsh-account'
 
 export { SIGN_IN_COOKIE, cookieValue }
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -80,6 +80,17 @@ export async function handleAuth(
       return
     }
     await sendMe(req, res, accounts, cookieSecure)
+    return
+  }
+  if (url.pathname === '/auth/operator/registration') {
+    if (method !== 'GET') {
+      res.writeHead(405, { allow: 'GET' })
+      res.end()
+      return
+    }
+    const operator = await requireOperator(req, res, accounts, cookieSecure)
+    if (operator === undefined) return
+    writeJson(res, 200, { ok: true, frozen: await accounts.isRegistrationFrozen() })
     return
   }
   if (method !== 'POST') {
@@ -172,6 +183,28 @@ export async function handleAuth(
     writeJson(res, 200, { ok: true })
     return
   }
+  if (url.pathname === '/auth/operator/ban') {
+    await handleOperatorBan(req, res, accounts, cookieSecure, 'ban')
+    return
+  }
+  if (url.pathname === '/auth/operator/lift-ban') {
+    await handleOperatorBan(req, res, accounts, cookieSecure, 'liftBan')
+    return
+  }
+  if (url.pathname === '/auth/operator/freeze-registration') {
+    const operator = await requireOperator(req, res, accounts, cookieSecure)
+    if (operator === undefined) return
+    const body = await readJsonObject(req, res)
+    if (body === undefined) return
+    const frozen = booleanField(body, 'frozen')
+    if (frozen === undefined) {
+      writeJson(res, 200, failure('invalid_request', 'frozen is required'))
+      return
+    }
+    await accounts.setRegistrationFrozen(frozen)
+    writeJson(res, 200, { ok: true, frozen })
+    return
+  }
   res.writeHead(404)
   res.end()
 }
@@ -255,7 +288,57 @@ async function sendMe(
   }
   const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
   res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, id, maxAge, cookieSecure))
-  writeJson(res, 200, { ok: true, signedIn: true, email: session.email })
+  writeJson(res, 200, {
+    ok: true,
+    signedIn: true,
+    email: session.email,
+    operator: session.operator,
+  })
+}
+
+async function requireOperator(
+  req: IncomingMessage,
+  res: ServerResponse,
+  accounts: Accounts,
+  cookieSecure: boolean,
+): Promise<SignInLookup | undefined> {
+  const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
+  if (id === undefined) {
+    writeJson(res, 200, failure('forbidden', 'Not allowed'))
+    return undefined
+  }
+  const session = await accounts.lookupSignIn(signInSessionId(id))
+  if (session === undefined || !session.operator) {
+    writeJson(res, 200, failure('forbidden', 'Not allowed'))
+    return undefined
+  }
+  const maxAge = Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
+  res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, id, maxAge, cookieSecure))
+  return session
+}
+
+async function handleOperatorBan(
+  req: IncomingMessage,
+  res: ServerResponse,
+  accounts: Accounts,
+  cookieSecure: boolean,
+  action: 'ban' | 'liftBan',
+): Promise<void> {
+  const operator = await requireOperator(req, res, accounts, cookieSecure)
+  if (operator === undefined) return
+  const body = await readJsonObject(req, res)
+  if (body === undefined) return
+  const email = stringField(body, 'email')
+  if (email === undefined) {
+    writeJson(res, 200, failure('invalid_request', 'email is required'))
+    return
+  }
+  const result = action === 'ban' ? await accounts.ban(email) : await accounts.liftBan(email)
+  if (!result.ok) {
+    writeJson(res, 200, failure(result.error, banMessage(result.error)))
+    return
+  }
+  writeJson(res, 200, { ok: true })
 }
 
 /**
@@ -344,6 +427,11 @@ function stringField(body: Record<string, unknown>, key: string): string | undef
   return typeof value === 'string' ? value : undefined
 }
 
+function booleanField(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key]
+  return typeof value === 'boolean' ? value : undefined
+}
+
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -355,17 +443,24 @@ function failure(code: string, message: string): { ok: false; error: { code: str
 }
 
 function registerMessage(
-  code: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed',
+  code: 'invalid_email' | 'invalid_password' | 'email_taken' | 'mail_failed' | 'registration_frozen',
 ): string {
   if (code === 'invalid_email') return 'Enter a valid email address'
   if (code === 'invalid_password') return 'Password is too short'
   if (code === 'mail_failed') return 'Account created; send a new verification email'
+  if (code === 'registration_frozen') return 'Registration is currently disabled'
   return 'An Account already exists for this email'
 }
 
-function signInMessage(code: 'invalid_credentials' | 'unverified'): string {
+function signInMessage(code: 'invalid_credentials' | 'unverified' | 'banned'): string {
   if (code === 'unverified') return 'Verify the email address before signing in'
+  if (code === 'banned') return 'This Account cannot sign in'
   return 'Email or password is incorrect'
+}
+
+function banMessage(code: 'invalid_email' | 'not_found'): string {
+  if (code === 'invalid_email') return 'Enter a valid email address'
+  return 'No Account for this email'
 }
 
 function resetMessage(code: 'invalid_or_expired' | 'invalid_password'): string {

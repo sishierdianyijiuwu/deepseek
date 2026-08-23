@@ -15,6 +15,7 @@ import {
   normalizeEmail,
   signInSessionId,
   verifyPassword,
+  type BanResult,
   type RegisterResult,
   type ResetPasswordResult,
   type SignInLookup,
@@ -56,6 +57,11 @@ export interface Config {
   passwordResetTtlMs?: number
   /** Minimum accepted Password length. */
   passwordMinLength?: number
+  /**
+   * Account emails that are Operators. Compared after `normalizeEmail`.
+   * Empty means no Operators; the first registrant is not special.
+   */
+  operatorEmails?: string[]
 }
 
 interface AccountRow {
@@ -63,6 +69,7 @@ interface AccountRow {
   email: string
   password_hash: string
   verified_at: number | bigint | null
+  banned_at: number | bigint | null
 }
 
 interface TokenRow {
@@ -86,6 +93,7 @@ export class PostgresAccounts extends Accounts {
     signInTtlMs: z.number().min(1).default(DEFAULT_SIGN_IN_TTL_MS),
     passwordResetTtlMs: z.number().min(1).default(DEFAULT_PASSWORD_RESET_TTL_MS),
     passwordMinLength: z.number().min(1).default(DEFAULT_PASSWORD_MIN_LENGTH),
+    operatorEmails: z.array(z.string()).default([]),
   })
 
   private sql: SqlClient | undefined
@@ -96,6 +104,7 @@ export class PostgresAccounts extends Accounts {
   private readonly signInTtlMs: number
   private readonly passwordResetTtlMs: number
   private readonly passwordMinLength: number
+  private readonly operatorEmails: ReadonlySet<string>
 
   /**
    * @param ctx - Cordis context.
@@ -114,6 +123,15 @@ export class PostgresAccounts extends Accounts {
     this.signInTtlMs = config.signInTtlMs ?? DEFAULT_SIGN_IN_TTL_MS
     this.passwordResetTtlMs = config.passwordResetTtlMs ?? DEFAULT_PASSWORD_RESET_TTL_MS
     this.passwordMinLength = config.passwordMinLength ?? DEFAULT_PASSWORD_MIN_LENGTH
+    const operators = new Set<string>()
+    for (const email of config.operatorEmails ?? []) {
+      const normalized = normalizeEmail(email)
+      if (normalized === undefined) {
+        throw new Error('account-postgres: operatorEmails contains an invalid email')
+      }
+      operators.add(normalized)
+    }
+    this.operatorEmails = operators
   }
 
   private get mailer(): Mailer {
@@ -147,18 +165,27 @@ export class PostgresAccounts extends Accounts {
    * @param password - visitor-supplied Password.
    * @returns `{ ok: true }` when the Unverified Account exists and the
    *   verification message was sent; `mail_failed` when the row exists but
-   *   the mailer rejected the send.
+   *   the mailer rejected the send; `registration_frozen` when public
+   *   registration is disabled.
    */
   override async register(email: string, password: string): Promise<RegisterResult> {
     const normalized = normalizeEmail(email)
     if (normalized === undefined) return { ok: false, error: 'invalid_email' }
     if (this.invalidPassword(password)) return { ok: false, error: 'invalid_password' }
+    if (await this.isRegistrationFrozen()) return { ok: false, error: 'registration_frozen' }
     const id = randomUUID()
     const passwordHash = await hashPassword(password)
     const token = mintSecret()
     const now = Date.now()
     try {
-      await this.client().transaction(async (sql) => {
+      const frozen = await this.client().transaction(async (sql) => {
+        await sql.query(
+          'INSERT INTO registration_control (id, frozen_at) VALUES (1, NULL) ON CONFLICT (id) DO NOTHING',
+        )
+        const control = await sql.query(
+          'SELECT frozen_at FROM registration_control WHERE id = 1 FOR UPDATE',
+        )
+        if (control.rows[0]?.['frozen_at'] != null) return true
         await sql.query(
           `INSERT INTO accounts (id, email, email_normalized, password_hash, verified_at, created_at)
            VALUES ($1, $2, $3, $4, NULL, $5)`,
@@ -169,7 +196,9 @@ export class PostgresAccounts extends Accounts {
            VALUES ($1, $2, $3)`,
           [token.hash, id, now + this.verificationTtlMs],
         )
+        return false
       })
+      if (frozen) return { ok: false, error: 'registration_frozen' }
     } catch (error) {
       if (isUniqueViolation(error)) return { ok: false, error: 'email_taken' }
       throw error
@@ -248,31 +277,42 @@ export class PostgresAccounts extends Accounts {
 
   /**
    * Create a Sign-in session after a verified Account presents the Password.
+   * After scrypt, re-reads `verified_at` / `banned_at` under `FOR UPDATE`.
    * @param email - visitor-supplied email.
    * @param password - visitor-supplied Password.
-   * @returns a Sign-in session id on success.
+   * @returns a Sign-in session id on success, or `banned` when Ban is in force.
    */
   override async signIn(email: string, password: string): Promise<SignInResult> {
     const normalized = normalizeEmail(email)
     const found = normalized === undefined
       ? undefined
       : (await this.client().query(
-        'SELECT id, email, password_hash, verified_at FROM accounts WHERE email_normalized = $1',
+        'SELECT id, email, password_hash, verified_at, banned_at FROM accounts WHERE email_normalized = $1',
         [normalized],
       )).rows[0] as AccountRow | undefined
     const hash = found?.password_hash ?? await this.dummyPasswordHash()
     const matches = await verifyPassword(password, hash)
     if (found === undefined || !matches) return { ok: false, error: 'invalid_credentials' }
-    if (found.verified_at == null) return { ok: false, error: 'unverified' }
     const session = mintSecret()
     const now = Date.now()
     const expiresAt = now + this.signInTtlMs
-    await this.client().query(
-      `INSERT INTO sign_in_sessions (id_hash, account_id, created_at, expires_at)
-       VALUES ($1, $2, $3, $4)`,
-      [session.hash, found.id, now, expiresAt],
-    )
-    return { ok: true, signInId: signInSessionId(session.raw), expiresAt }
+    return this.client().transaction(async (sql) => {
+      const locked = await sql.query(
+        'SELECT verified_at, banned_at FROM accounts WHERE id = $1 FOR UPDATE',
+        [found.id],
+      )
+      const row = locked.rows[0] as Pick<AccountRow, 'verified_at' | 'banned_at'> | undefined
+      /* v8 ignore next -- Deletion is a later ticket; this id was just read from accounts. */
+      if (row === undefined) return { ok: false, error: 'invalid_credentials' }
+      if (row.verified_at == null) return { ok: false, error: 'unverified' }
+      if (row.banned_at != null) return { ok: false, error: 'banned' }
+      await sql.query(
+        `INSERT INTO sign_in_sessions (id_hash, account_id, created_at, expires_at)
+         VALUES ($1, $2, $3, $4)`,
+        [session.hash, found.id, now, expiresAt],
+      )
+      return { ok: true, signInId: signInSessionId(session.raw), expiresAt }
+    })
   }
 
   /**
@@ -289,7 +329,8 @@ export class PostgresAccounts extends Accounts {
   /**
    * Resolve a presented Sign-in session id and slide its expiry forward.
    * @param signInId - the id the browser presented.
-   * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
+   * @returns the live Sign-in session, or `undefined` when it is unknown,
+   *   expired, or the Account is Banned.
    */
   override async lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined> {
     const now = Date.now()
@@ -302,6 +343,7 @@ export class PostgresAccounts extends Accounts {
          AND s.expires_at > $3
          AND s.account_id = a.id
          AND a.verified_at IS NOT NULL
+         AND a.banned_at IS NULL
        RETURNING s.account_id, a.email, s.expires_at`,
       [expiresAt, hashSecret(signInId), now],
     )
@@ -311,6 +353,7 @@ export class PostgresAccounts extends Accounts {
       accountId: accountId(row.account_id),
       email: row.email,
       expiresAt: Number(row.expires_at),
+      operator: this.operatorEmails.has(row.email),
     }
   }
 
@@ -378,6 +421,84 @@ export class PostgresAccounts extends Accounts {
       )
       return { ok: true }
     })
+  }
+
+  /**
+   * Ban an Account by email and end every Sign-in session for it.
+   * @param email - target Account email.
+   * @returns `{ ok: true }` when the Account exists, or `not_found`.
+   */
+  override async ban(email: string): Promise<BanResult> {
+    const normalized = normalizeEmail(email)
+    if (normalized === undefined) return { ok: false, error: 'invalid_email' }
+    return this.client().transaction(async (sql) => {
+      const found = await sql.query(
+        'SELECT id FROM accounts WHERE email_normalized = $1 FOR UPDATE',
+        [normalized],
+      )
+      const row = found.rows[0] as { id: string } | undefined
+      if (row === undefined) return { ok: false, error: 'not_found' }
+      await sql.query(
+        'UPDATE accounts SET banned_at = $1 WHERE id = $2 AND banned_at IS NULL',
+        [Date.now(), row.id],
+      )
+      await sql.query(
+        'DELETE FROM sign_in_sessions WHERE account_id = $1',
+        [row.id],
+      )
+      return { ok: true }
+    })
+  }
+
+  /**
+   * Lift a Ban and delete leftover Sign-in sessions so a raced insert cannot
+   * become a live cookie.
+   * @param email - target Account email.
+   * @returns `{ ok: true }` when the Account exists, or `not_found`.
+   */
+  override async liftBan(email: string): Promise<BanResult> {
+    const normalized = normalizeEmail(email)
+    if (normalized === undefined) return { ok: false, error: 'invalid_email' }
+    return this.client().transaction(async (sql) => {
+      const found = await sql.query(
+        'SELECT id FROM accounts WHERE email_normalized = $1 FOR UPDATE',
+        [normalized],
+      )
+      const row = found.rows[0] as { id: string } | undefined
+      if (row === undefined) return { ok: false, error: 'not_found' }
+      await sql.query(
+        'UPDATE accounts SET banned_at = NULL WHERE id = $1',
+        [row.id],
+      )
+      await sql.query(
+        'DELETE FROM sign_in_sessions WHERE account_id = $1',
+        [row.id],
+      )
+      return { ok: true }
+    })
+  }
+
+  /**
+   * Freeze or unfreeze public registration.
+   * @param frozen - whether new registration is refused.
+   */
+  override async setRegistrationFrozen(frozen: boolean): Promise<void> {
+    await this.client().query(
+      `INSERT INTO registration_control (id, frozen_at) VALUES (1, $1)
+       ON CONFLICT (id) DO UPDATE SET frozen_at = EXCLUDED.frozen_at`,
+      [frozen ? Date.now() : null],
+    )
+  }
+
+  /**
+   * Whether public registration is frozen.
+   * @returns true when `register` must return `registration_frozen`.
+   */
+  override async isRegistrationFrozen(): Promise<boolean> {
+    const found = await this.client().query(
+      'SELECT frozen_at FROM registration_control WHERE id = 1',
+    )
+    return found.rows[0]?.['frozen_at'] != null
   }
 
   private invalidPassword(password: string): boolean {

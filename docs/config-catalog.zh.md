@@ -25,7 +25,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/account/account-http/src/index.ts:20`](../packages/account/account-http/src/index.ts)
+来源：[`packages/account/account-http/src/index.ts:19`](../packages/account/account-http/src/index.ts)
 
 <a id="deepseek-aidsh-account-postgres"></a>
 
@@ -51,10 +51,15 @@ export interface Config {
   passwordResetTtlMs?: number
   /** Minimum accepted Password length. */
   passwordMinLength?: number
+  /**
+   * Account emails that are Operators. Compared after `normalizeEmail`.
+   * Empty means no Operators; the first registrant is not special.
+   */
+  operatorEmails?: string[]
 }
 ```
 
-来源：[`packages/account/account-postgres/src/index.ts:43`](../packages/account/account-postgres/src/index.ts)
+来源：[`packages/account/account-postgres/src/index.ts:44`](../packages/account/account-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-acp"></a>
 

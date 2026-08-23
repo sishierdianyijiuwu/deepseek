@@ -82,6 +82,7 @@ async function boot(overrides?: {
   verificationTtlMs?: number
   signInTtlMs?: number
   passwordResetTtlMs?: number
+  operatorEmails?: string[]
 }): Promise<Harness> {
   mailbox.length = 0
   failSend = false
@@ -105,6 +106,12 @@ async function boot(overrides?: {
       : []),
     ...(overrides?.passwordResetTtlMs !== undefined
       ? [`    passwordResetTtlMs: ${String(overrides.passwordResetTtlMs)}`]
+      : []),
+    ...(overrides?.operatorEmails !== undefined
+      ? [
+        '    operatorEmails:',
+        ...overrides.operatorEmails.map(email => `      - '${email}'`),
+      ]
       : []),
     "- name: '@deepseek-ai/dsh-account-http'",
     '',
@@ -239,7 +246,7 @@ describe('auth HTTP', () => {
     expect(setCookie).not.toContain('Secure')
 
     const me = await request(harness, '/auth/me')
-    expect(me.json).toEqual({ ok: true, signedIn: true, email })
+    expect(me.json).toEqual({ ok: true, signedIn: true, email, operator: false })
 
     const signedOut = await post(harness, '/auth/sign-out', {})
     expect(signedOut.json).toEqual({ ok: true })
@@ -545,12 +552,17 @@ describe('auth HTTP', () => {
 
     nowMs += 13 * DAY_MS
     const slid = await request(harness, '/auth/me')
-    expect(slid.json).toEqual({ ok: true, signedIn: true, email })
+    expect(slid.json).toEqual({ ok: true, signedIn: true, email, operator: false })
     expect(slid.headers.getSetCookie().join('; '))
       .toContain(`Max-Age=${String(DEFAULT_SIGN_IN_TTL_MS / 1000)}`)
 
     nowMs += 13 * DAY_MS
-    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: true, email })
+    expect((await request(harness, '/auth/me')).json).toEqual({
+      ok: true,
+      signedIn: true,
+      email,
+      operator: false,
+    })
 
     nowMs += DEFAULT_SIGN_IN_TTL_MS + 1
     expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
@@ -566,5 +578,192 @@ describe('auth HTTP', () => {
     nowMs += DEFAULT_SIGN_IN_TTL_MS + 1
     expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
     expect(harness.jar.hasSignIn()).toBe(true)
+  })
+})
+
+describe('operator Ban and freeze', () => {
+  it('lets only configured operator emails Ban and freeze; first registrant is not special', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['Ops@Example.COM'] })
+    const password = 'correct-horse'
+    const ordinary = 'first@example.com'
+    const operator = 'ops@example.com'
+    const ordinaryJar = harness.jar
+    const operatorJar = new CookieJar()
+
+    expect((await post(harness, '/auth/register', { email: ordinary, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: ordinary, password }, ordinaryJar)).json)
+      .toEqual({ ok: true })
+    expect((await request(harness, '/auth/me', {}, ordinaryJar)).json)
+      .toEqual({ ok: true, signedIn: true, email: ordinary, operator: false })
+
+    expect((await post(harness, '/auth/operator/ban', { email: operator }, ordinaryJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await post(harness, '/auth/operator/freeze-registration', { frozen: true }, ordinaryJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await request(harness, '/auth/operator/registration', {}, ordinaryJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await post(harness, '/auth/operator/ban', { email: ordinary })).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    const anonymous = new CookieJar()
+    expect((await post(harness, '/auth/operator/ban', { email: ordinary }, anonymous)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await request(harness, '/auth/operator/registration', {}, anonymous)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    const dead = new CookieJar()
+    dead.absorb(new Response(null, { headers: { 'set-cookie': `${SIGN_IN_COOKIE}=deadbeef` } }))
+    expect((await post(harness, '/auth/operator/lift-ban', { email: ordinary }, dead)).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+
+    expect((await post(harness, '/auth/register', { email: operator, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: operator, password }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await request(harness, '/auth/me', {}, operatorJar)).json)
+      .toEqual({ ok: true, signedIn: true, email: operator, operator: true })
+
+    expect((await request(harness, '/auth/operator/registration', {}, operatorJar)).json)
+      .toEqual({ ok: true, frozen: false })
+    expect((await request(harness, '/auth/operator/registration', { method: 'POST' }, operatorJar)).status)
+      .toBe(405)
+    expect((await post(harness, '/auth/operator/freeze-registration', {}, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await post(harness, '/auth/operator/freeze-registration', { frozen: true }, operatorJar)).json)
+      .toEqual({ ok: true, frozen: true })
+    expect((await request(harness, '/auth/operator/registration', {}, operatorJar)).json)
+      .toEqual({ ok: true, frozen: true })
+    expect((await post(harness, '/auth/register', { email: 'visitor@example.com', password })).json)
+      .toMatchObject({ ok: false, error: { code: 'registration_frozen' } })
+    expect((await post(harness, '/auth/operator/freeze-registration', { frozen: false }, operatorJar)).json)
+      .toEqual({ ok: true, frozen: false })
+    expect((await post(harness, '/auth/register', { email: 'visitor@example.com', password })).json)
+      .toEqual({ ok: true })
+
+    expect((await post(harness, '/auth/operator/ban', { email: ordinary }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/operator/ban', { email: ordinary }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await request(harness, '/auth/me', {}, ordinaryJar)).json)
+      .toEqual({ ok: true, signedIn: false })
+    expect((await post(harness, '/auth/sign-in', { email: ordinary, password }, ordinaryJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'banned' } })
+    expect((await post(harness, '/auth/register', { email: ordinary, password })).json)
+      .toMatchObject({ ok: false, error: { code: 'email_taken' } })
+
+    expect((await post(harness, '/auth/operator/lift-ban', { email: ordinary }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/operator/lift-ban', { email: ordinary }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/sign-in', { email: ordinary, password }, ordinaryJar)).json)
+      .toEqual({ ok: true })
+    expect((await request(harness, '/auth/me', {}, ordinaryJar)).json)
+      .toEqual({ ok: true, signedIn: true, email: ordinary, operator: false })
+
+    expect((await post(harness, '/auth/operator/ban', { email: 'nobody@example.com' }, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'not_found' } })
+    expect((await post(harness, '/auth/operator/lift-ban', { email: 'nobody@example.com' }, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'not_found' } })
+    expect((await post(harness, '/auth/operator/ban', { email: 'not-an-email' }, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_email' } })
+    expect((await post(harness, '/auth/operator/lift-ban', { email: 'not-an-email' }, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_email' } })
+    expect((await post(harness, '/auth/operator/ban', {}, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await post(harness, '/auth/operator/lift-ban', {}, operatorJar)).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_request' } })
+    expect((await request(harness, '/auth/operator/ban', { method: 'GET' }, operatorJar)).status).toBe(405)
+    expect((await request(harness, '/auth/operator/ban', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    }, operatorJar)).status).toBe(400)
+    expect((await request(harness, '/auth/operator/freeze-registration', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    }, operatorJar)).status).toBe(400)
+  })
+
+  it('does not restore sign-in when a Banned Account resets the Password', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['ops@example.com'] })
+    const password = 'correct-horse'
+    const nextPassword = 'correct-zebra'
+    const target = 'banned@example.com'
+    const operatorJar = new CookieJar()
+
+    expect((await post(harness, '/auth/register', { email: target, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/register', { email: 'ops@example.com', password })).json)
+      .toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: 'ops@example.com', password }, operatorJar)).json)
+      .toEqual({ ok: true })
+
+    expect((await post(harness, '/auth/operator/ban', { email: target }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/request-password-reset', { email: target })).json)
+      .toEqual({ ok: true })
+    const token = tokenFromMailbox('reset')
+    expect((await post(harness, '/auth/reset-password', { token, password: nextPassword })).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/sign-in', { email: target, password: nextPassword })).json)
+      .toMatchObject({ ok: false, error: { code: 'banned' } })
+    expect((await post(harness, '/auth/sign-in', { email: target, password })).json)
+      .toMatchObject({ ok: false, error: { code: 'invalid_credentials' } })
+
+    expect((await post(harness, '/auth/operator/lift-ban', { email: target }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/sign-in', { email: target, password: nextPassword })).json)
+      .toEqual({ ok: true })
+  })
+
+  it('does not leave a live cookie when Ban races with sign-in', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['ops@example.com'] })
+    const password = 'correct-horse'
+    const target = 'race-ban@example.com'
+    const targetJar = new CookieJar()
+    const operatorJar = new CookieJar()
+
+    expect((await post(harness, '/auth/register', { email: target, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/register', { email: 'ops@example.com', password })).json)
+      .toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: 'ops@example.com', password }, operatorJar)).json)
+      .toEqual({ ok: true })
+
+    await Promise.all([
+      post(harness, '/auth/sign-in', { email: target, password }, targetJar),
+      post(harness, '/auth/operator/ban', { email: target }, operatorJar),
+    ])
+    expect((await request(harness, '/auth/me', {}, targetJar)).json)
+      .toEqual({ ok: true, signedIn: false })
+    expect((await post(harness, '/auth/operator/lift-ban', { email: target }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await request(harness, '/auth/me', {}, targetJar)).json)
+      .toEqual({ ok: true, signedIn: false })
+    expect((await post(harness, '/auth/sign-in', { email: target, password }, targetJar)).json)
+      .toEqual({ ok: true })
+  })
+
+  it('freezes later register when freeze races with register', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['ops@example.com'] })
+    const password = 'correct-horse'
+    const operatorJar = new CookieJar()
+
+    expect((await post(harness, '/auth/register', { email: 'ops@example.com', password })).json)
+      .toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: 'ops@example.com', password }, operatorJar)).json)
+      .toEqual({ ok: true })
+
+    await Promise.all([
+      post(harness, '/auth/register', { email: 'race-freeze@example.com', password }),
+      post(harness, '/auth/operator/freeze-registration', { frozen: true }, operatorJar),
+    ])
+    expect((await request(harness, '/auth/operator/registration', {}, operatorJar)).json)
+      .toEqual({ ok: true, frozen: true })
+    expect((await post(harness, '/auth/register', { email: 'after-freeze@example.com', password })).json)
+      .toMatchObject({ ok: false, error: { code: 'registration_frozen' } })
   })
 })

@@ -100,7 +100,7 @@ describe('AccountGate', () => {
     const me = vi.fn(() => new Promise<MeResult>((resolve) => { resolveMe = resolve }))
     const { view } = setup({ me })
     view.unmount()
-    resolveMe({ ok: true, signedIn: true, email: 'late@example.com' })
+    resolveMe({ ok: true, signedIn: true, email: 'late@example.com', operator: false })
     await Promise.resolve()
     expect(screen.queryByText('已登录 late@example.com')).toBeNull()
 
@@ -112,7 +112,9 @@ describe('AccountGate', () => {
     await Promise.resolve()
 
     const signedIn = setup({
-      me: vi.fn(async (): Promise<MeResult> => ({ ok: true, signedIn: true, email: 'me@example.com' })),
+      me: vi.fn(async (): Promise<MeResult> => ({
+        ok: true, signedIn: true, email: 'me@example.com', operator: false,
+      })),
     })
     await waitFor(() => { expect(screen.getByText('已登录 me@example.com')).toBeTruthy() })
     expect(signedIn.props.replaceSearch).not.toHaveBeenCalled()

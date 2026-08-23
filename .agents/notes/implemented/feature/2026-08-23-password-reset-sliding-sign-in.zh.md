@@ -6,13 +6,13 @@ Status: implemented
 
 ## 问题
 
-忘记 Password 的已验证 Account 没有恢复路径。不滑动的 Sign-in session 会在 14 个日历日后登出，即使该 Account 一直在使用产品；会话 cookie 则会在关闭浏览器时登出。若不在重置时结束该 Account 的每一个 Sign-in session，被盗 cookie 也会在改密后继续有效。Ban 尚不存在，因此重置无法查阅它。工单 #4 在另一个 worktree 绑定 `/api`；滑动不能等 Session 方法。
+忘记 Password 的已验证 Account 没有恢复路径。不滑动的 Sign-in session 会在 14 个日历日后登出，即使该 Account 一直在使用产品；会话 cookie 则会在关闭浏览器时登出。若不在重置时结束该 Account 的每一个 Sign-in session，被盗 cookie 也会在改密后继续有效。Banned Account 不得通过密码重置重新获得 Sign-in session。滑动不能等 Session 方法。
 
 ## 决策
 
 密码重置与滑动有效期落在现有 Account seam 上（[包](../architecture/2026-08-23-account-mailer-postgres-seam.zh.md)）。
 
-`requestPasswordReset(email)` 对未知、Unverified 或无效地址是静默成功，以免 HTTP 路由枚举 Account。已验证 Account 得到一次性、以 SHA-256 存储的令牌，寿命为 `passwordResetTtlMs`（默认 1 小时）。`account_id` 唯一；再次请求会 `UPSERT` 该行。该发送上的 mailer 失败也是静默的。`resetPassword(token, password)` 在 Password 过短时拒绝且不消费令牌。仍有效的令牌在 scrypt 之前用 `DELETE … RETURNING` 消费；零行则是 `invalid_or_expired`。成功时再替换 Password 哈希并删除每一个 Sign-in session 行。
+`requestPasswordReset(email)` 对未知、Unverified 或无效地址是静默成功，以免 HTTP 路由枚举 Account。已验证 Account 得到一次性、以 SHA-256 存储的令牌，寿命为 `passwordResetTtlMs`（默认 1 小时）。`account_id` 唯一；再次请求会 `UPSERT` 该行。该发送上的 mailer 失败也是静默的。`resetPassword(token, password)` 在 Password 过短时拒绝且不消费令牌。仍有效的令牌在 scrypt 之前用 `DELETE … RETURNING` 消费；零行则是 `invalid_or_expired`。成功时再替换 Password 哈希并删除每一个 Sign-in session 行。它不清除 Ban：在 Operator 解除 Ban 之前，`signIn` 仍返回 `banned`。
 
 `GET /reset?token=` 是具名宿主路由，因为 `frontend-static` 对未知路径返回 404。HEAD 返回 200 且不消费令牌（邮件扫描器）。GET 重定向到 `/?reset=<token>` 且不消费；overlay 再 POST `/auth/reset-password`。重置成功会清除 `dsh_sign_in` cookie。
 
@@ -38,4 +38,4 @@ HTTP 测试用 spy `Date.now` 作为假时钟，并继续使用假 Mailer 子类
 
 ## 后果
 
-恢复与滑动在没有 Ban、也不把 `/api` 绑到 Sign-in session 的情况下存在。Ban 到来时必须拒绝会恢复登录的重置。schema 版本为 2；v1 控制面数据库在加载时失败。工单 #4 可以调用 `lookupSignIn` 并继承滑动。
+恢复与滑动落在 Account seam 上。重置不会签发 Sign-in session。在 `banned_at` 已设置时，成功重置后 `signIn` 仍返回 `banned`。schema 版本为 3；外来控制面数据库在加载时失败。`/api` 查找调用 `lookupSignIn` 并继承滑动。
