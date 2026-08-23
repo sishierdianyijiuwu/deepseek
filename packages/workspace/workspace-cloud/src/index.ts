@@ -1,0 +1,539 @@
+/**
+ * Cloud Workspaces (`ctx.cloudWorkspaces`): Account-owned directories on the
+ * control-plane filesystem (empty or public-git Import), metadata in PostgreSQL,
+ * count and size caps.
+ * @module @deepseek-ai/dsh-workspace-cloud
+ */
+
+import { randomUUID } from 'node:crypto'
+import { lstat, mkdir, realpath, rm, unlink } from 'node:fs/promises'
+import { join } from 'node:path'
+import { Context, Service } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import type { AccountId } from '@deepseek-ai/dsh-account'
+import type { Workspace } from '@deepseek-ai/dsh-workspace'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import { isUniqueViolation, openSql, type SqlClient } from '@deepseek-ai/dsh-account-postgres'
+import {
+  CloudWorkspacePathError,
+  CloudWorkspaceQuotaError,
+  ingestWorkspaceTree,
+  listWorkspaceFiles,
+  MAX_WORKSPACE_BYTES,
+  readWorkspaceFile,
+  treeBytes,
+  writeWorkspaceFile,
+} from './files.ts'
+import {
+  copyBackWorkspace,
+  hydrateWorkspace,
+  type ExecutionWorld,
+} from './sync.ts'
+import {
+  clonePublicGit,
+  DEFAULT_WORKSPACE_TITLE,
+  IMPORT_CLONE_TIMEOUT_MS,
+  parsePublicHttpsGitUrl,
+  titleFromGitUrl,
+} from './git.ts'
+import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
+
+export { SCHEMA_VERSION }
+export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError, ingestWorkspaceTree }
+export {
+  copyBackWorkspace,
+  EXECUTION_WORLD_RUNTIME_DIR,
+  hydrateWorkspace,
+} from './sync.ts'
+export type { ExecutionWorld, ExecutionWorldEntry, ExecutionWorldFiles } from './sync.ts'
+export {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
+  DEFAULT_WORKSPACE_TITLE,
+  IMPORT_CLONE_TIMEOUT_MS,
+  parsePublicHttpsGitUrl,
+  redactGitUrl,
+  titleFromGitUrl,
+} from './git.ts'
+export type { CloudWorkspaceRecord } from './types.ts'
+
+/** v1 cap: three Workspaces per Account (ADR 0009). */
+export const MAX_WORKSPACES_PER_ACCOUNT = 3
+
+/** The Account already holds {@link MAX_WORKSPACES_PER_ACCOUNT} Workspaces. */
+export class CloudWorkspaceLimitError extends Error {
+  constructor() {
+    super(`an Account may have at most ${String(MAX_WORKSPACES_PER_ACCOUNT)} Workspaces`)
+    this.name = 'CloudWorkspaceLimitError'
+  }
+}
+
+/** The Workspace is missing or not owned by the signed-in Account. */
+export class CloudWorkspaceNotFoundError extends Error {
+  /**
+   * @param workspaceId - requested id.
+   */
+  constructor(readonly workspaceId: WorkspaceId) {
+    super(`workspace '${workspaceId}' not found`)
+    this.name = 'CloudWorkspaceNotFoundError'
+  }
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    cloudWorkspaces: CloudWorkspaces
+  }
+}
+
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Control-plane directory that holds per-Account Workspace trees. */
+  root: string
+  /**
+   * Wall-clock bound for one Import clone. Defaults to
+   * {@link IMPORT_CLONE_TIMEOUT_MS}.
+   */
+  importTimeoutMs?: number
+  /**
+   * Skip TLS verify on Import clone. Default false; tests set true for a
+   * self-signed local git-http-backend. Production must leave this false.
+   */
+  importTlsInsecure?: boolean
+}
+
+/**
+ * Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or
+ * Import a public HTTPS git remote into a new slot namespaced by Account,
+ * persist metadata in PostgreSQL, and enforce the v1 count and size caps.
+ * The Host workspace registry still owns session membership for those
+ * directories. PostgreSQL is the ownership and slot source of truth: startup
+ * adopts each row into the registry by path so a wiped KV store does not
+ * hide live directories.
+ */
+export class CloudWorkspaces extends Service {
+  static inject = ['workspaceRegistry']
+
+  static Config: z<Config> = z.object({
+    url: z.string().required(),
+    root: z.string().required(),
+    importTimeoutMs: z.number().default(IMPORT_CLONE_TIMEOUT_MS),
+    importTlsInsecure: z.boolean().default(false),
+  })
+
+  private sql: SqlClient | undefined
+  private readonly url: string
+  private root: string
+  private readonly importTimeoutMs: number
+  private readonly importTlsInsecure: boolean
+  private readonly owners = new Map<string, AccountId>()
+  private readonly pendingPaths = new Map<string, AccountId>()
+  private readonly writeTails = new Map<string, Promise<void>>()
+
+  /**
+   * @param ctx - Cordis context.
+   * @param config - validated provider config.
+   */
+  constructor(ctx: Context, config: Config) {
+    super(ctx, 'cloudWorkspaces')
+    if (config.url === '' || config.root === '') {
+      throw new Error('workspace-cloud: url and root are required')
+    }
+    this.url = config.url
+    this.root = config.root
+    this.importTimeoutMs = config.importTimeoutMs ?? IMPORT_CLONE_TIMEOUT_MS
+    this.importTlsInsecure = config.importTlsInsecure === true
+  }
+
+  /** Open PostgreSQL, apply schema, create the file root, and load ownership. */
+  protected async [Service.init](): Promise<void> {
+    const sql = await openSql(this.url, 'workspace-cloud')
+    try {
+      await ensureSchema(sql)
+    } catch (error) {
+      await sql.close()
+      throw error
+    }
+    this.sql = sql
+    await mkdir(this.root, { recursive: true })
+    this.root = await realpath(this.root)
+    await this.restoreRegistry()
+    this.ctx.effect(() => () => {
+      this.sql = undefined
+      this.owners.clear()
+      void sql.close()
+    }, 'workspace-cloud: close sql')
+  }
+
+  /**
+   * Whether `workspaceId` is a cloud Workspace owned by `accountId`.
+   * @param accountId - signed-in Account.
+   * @param workspaceId - Host Workspace id.
+   * @returns true when the in-memory ownership map agrees.
+   */
+  owns(accountId: AccountId, workspaceId: WorkspaceId): boolean {
+    if (this.owners.get(workspaceId) === accountId) return true
+    const workspace = this.ctx.get('workspaceRegistry')?.get(workspaceId)
+    return workspace !== undefined && this.pendingPaths.get(workspace.path) === accountId
+  }
+
+  /**
+   * Create an empty Workspace directory for `accountId`.
+   * @param accountId - owning Account.
+   * @param title - display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.
+   * @returns the registry Workspace after the PG row and directory exist.
+   */
+  async createEmpty(accountId: AccountId, title?: string): Promise<Workspace> {
+    const workspaceTitle = title !== undefined && title.trim() !== '' ? title.trim() : DEFAULT_WORKSPACE_TITLE
+    if (await this.nextSlot(accountId) === undefined) throw new CloudWorkspaceLimitError()
+    const directory = join(this.root, accountId, randomUUID())
+    await mkdir(directory, { recursive: true })
+    try {
+      return await this.commitOwned(accountId, directory, workspaceTitle)
+    } catch (error: unknown) {
+      await rm(directory, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  /**
+   * Import a public HTTPS git remote into a new owned Workspace slot.
+   * Clone runs in an unlisted directory under the Account prefix; the
+   * registry row is created only after clone and the 1 GiB check succeed.
+   * Private, credential-bearing, and non-HTTPS remotes throw
+   * {@link CloudWorkspaceImportUrlError} before `git` runs. A fourth
+   * Workspace throws {@link CloudWorkspaceLimitError}. A tree past 1 GiB
+   * throws {@link CloudWorkspaceQuotaError}. Clone failure throws
+   * {@link CloudWorkspaceImportError}. Failed ingest does not keep a slot.
+   * @param accountId - owning Account.
+   * @param gitUrl - public HTTPS git URL.
+   * @param title - display title; omitted or blank uses the repo basename.
+   * @param signal - optional abort from the unary RPC.
+   * @returns the registry Workspace after clone and the size check.
+   */
+  async importPublicGit(
+    accountId: AccountId,
+    gitUrl: string,
+    title?: string,
+    signal?: AbortSignal,
+  ): Promise<Workspace> {
+    const url = parsePublicHttpsGitUrl(gitUrl)
+    if (await this.nextSlot(accountId) === undefined) throw new CloudWorkspaceLimitError()
+    const workspaceTitle = title !== undefined && title.trim() !== ''
+      ? title.trim()
+      : titleFromGitUrl(url)
+    const directory = join(this.root, accountId, randomUUID())
+    await mkdir(directory, { recursive: true })
+    try {
+      await clonePublicGit(url, directory, {
+        timeoutMs: this.importTimeoutMs,
+        tlsInsecure: this.importTlsInsecure,
+        ...signal === undefined ? {} : { signal },
+      })
+      const bytes = await treeBytes(directory)
+      if (bytes > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, bytes)
+      return await this.commitOwned(accountId, directory, workspaceTitle)
+    } catch (error: unknown) {
+      await rm(directory, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  /**
+   * Register an existing Account-namespaced directory as a cloud Workspace.
+   * @param accountId - owning Account.
+   * @param directory - dest that already exists under the Account prefix.
+   * @param title - display title.
+   * @returns the registry Workspace after the PG row exists.
+   */
+  private async commitOwned(accountId: AccountId, directory: string, title: string): Promise<Workspace> {
+    const canonical = await realpath(directory)
+    for (;;) {
+      const slot = await this.nextSlot(accountId)
+      if (slot === undefined) throw new CloudWorkspaceLimitError()
+      this.pendingPaths.set(canonical, accountId)
+      let entity: Workspace
+      try {
+        entity = await this.ctx.workspaceRegistry.create(canonical, title)
+      } catch (error) {
+        this.pendingPaths.delete(canonical)
+        throw error
+      }
+      this.pendingPaths.delete(canonical)
+      this.owners.set(entity.id, accountId)
+      const now = Date.now()
+      try {
+        await this.client().query(
+          `INSERT INTO cloud_workspaces (id, account_id, title, path, slot, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [entity.id, accountId, entity.title, entity.path, slot, now, now],
+        )
+      } catch (error) {
+        this.owners.delete(entity.id)
+        await this.ctx.workspaceRegistry.delete(entity.id)
+        if (isUniqueViolation(error) && (await this.nextSlot(accountId)) !== undefined) continue
+        if (isUniqueViolation(error)) throw new CloudWorkspaceLimitError()
+        throw error
+      }
+      return entity
+    }
+  }
+
+  /**
+   * Registry Workspaces this Account owns, in durable registry order.
+   * @param accountId - owning Account.
+   * @returns owned Workspaces that still exist in the registry.
+   */
+  listOwned(accountId: AccountId): Workspace[] {
+    return this.ctx.workspaceRegistry.list().filter(workspace => this.owns(accountId, workspace.id))
+  }
+
+  /**
+   * Look up one owned Workspace.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @returns the registry Workspace, or `undefined` when missing or not owned.
+   */
+  getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined {
+    if (!this.owns(accountId, workspaceId)) return undefined
+    return this.ctx.workspaceRegistry.get(workspaceId)
+  }
+
+  /**
+   * Delete an owned Workspace: PostgreSQL row, registry registration, and durable files.
+   * Waits for in-flight `writeFile` calls on this id, then removes the tree.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @returns true when a row was deleted.
+   */
+  async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) return false
+      await this.client().query(
+        'DELETE FROM cloud_workspaces WHERE id = $1 AND account_id = $2',
+        [workspaceId, accountId],
+      )
+      this.owners.delete(workspaceId)
+      await this.ctx.workspaceRegistry.delete(workspaceId)
+      await rm(path, { recursive: true, force: true })
+      return true
+    })
+  }
+
+  /**
+   * Delete every Workspace this Account owns, then remove the Account prefix
+   * directory. A planted symlink at that prefix is unlinked rather than followed.
+   * @param accountId - owning Account.
+   */
+  async deleteAllOwned(accountId: AccountId): Promise<void> {
+    for (const workspace of this.listOwned(accountId)) {
+      await this.deleteOwned(accountId, workspace.id)
+    }
+    const accountRoot = join(this.root, accountId)
+    try {
+      const st = await lstat(accountRoot)
+      if (st.isSymbolicLink()) {
+        await unlink(accountRoot)
+        return
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    await rm(accountRoot, { recursive: true, force: true })
+  }
+
+  /**
+   * Write a file into an owned Workspace, refusing a tree past 1 GiB.
+   * Serialized with other writes and `deleteOwned` for the same id; a delete
+   * that already dropped the row fails as {@link CloudWorkspaceNotFoundError}.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param relativePath - file path inside the Workspace.
+   * @param data - bytes to write.
+   */
+  async writeFile(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    relativePath: string,
+    data: Uint8Array,
+  ): Promise<void> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await writeWorkspaceFile(path, relativePath, data)
+    })
+  }
+
+  /**
+   * List regular files in an owned Workspace as POSIX-relative paths.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @returns sorted relative paths.
+   */
+  async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      return listWorkspaceFiles(path)
+    })
+  }
+
+  /**
+   * Read one contained file from an owned Workspace.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param relativePath - file path inside the Workspace.
+   * @returns file bytes.
+   */
+  async readFile(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    relativePath: string,
+  ): Promise<Uint8Array> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      return readWorkspaceFile(path, relativePath)
+    })
+  }
+
+  /**
+   * Copy this Account's durable Workspace files into an execution-world cwd.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param world - execution-world filesystem (the E2B sandbox).
+   * @param remoteCwd - absolute sandbox working directory.
+   */
+  async hydrateInto(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    world: ExecutionWorld,
+    remoteCwd: string,
+  ): Promise<void> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await hydrateWorkspace(path, world, remoteCwd)
+    })
+  }
+
+  /**
+   * Replace the durable Workspace with the execution-world tree, refusing a
+   * copy past 1 GiB without growing the durable copy.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param world - execution-world filesystem (the E2B sandbox).
+   * @param remoteCwd - absolute sandbox working directory.
+   */
+  async copyBackFrom(
+    accountId: AccountId,
+    workspaceId: WorkspaceId,
+    world: ExecutionWorld,
+    remoteCwd: string,
+  ): Promise<void> {
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await copyBackWorkspace(path, world, remoteCwd)
+    })
+  }
+
+  /**
+   * Persist a new display title on the PostgreSQL row after the registry write.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param title - new title.
+   */
+  async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void> {
+    await this.client().query(
+      'UPDATE cloud_workspaces SET title = $1, updated_at = $2 WHERE id = $3 AND account_id = $4',
+      [title, Date.now(), workspaceId, accountId],
+    )
+  }
+
+  /**
+   * Run `operation` after every prior write/delete for `workspaceId` has settled.
+   * @param workspaceId - Host Workspace id.
+   * @param operation - write or delete work that re-checks ownership.
+   * @returns the operation result.
+   */
+  private enqueueFileOp<T>(workspaceId: WorkspaceId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeTails.get(workspaceId) ?? Promise.resolve()
+    const run = previous.then(operation)
+    const settled = run.then(() => undefined, () => undefined)
+    this.writeTails.set(workspaceId, settled)
+    void settled.then(() => {
+      if (this.writeTails.get(workspaceId) === settled) this.writeTails.delete(workspaceId)
+    })
+    return run
+  }
+
+  private async ownedPath(accountId: AccountId, workspaceId: WorkspaceId): Promise<string | undefined> {
+    const result = await this.client().query(
+      'SELECT path FROM cloud_workspaces WHERE id = $1 AND account_id = $2',
+      [workspaceId, accountId],
+    )
+    const path = result.rows[0]?.['path']
+    return typeof path === 'string' ? path : undefined
+  }
+
+  private async nextSlot(accountId: AccountId): Promise<number | undefined> {
+    const result = await this.client().query(
+      'SELECT slot FROM cloud_workspaces WHERE account_id = $1',
+      [accountId],
+    )
+    const used = new Set(result.rows.map(row => Number(row['slot'])))
+    for (let slot = 0; slot < MAX_WORKSPACES_PER_ACCOUNT; slot += 1) {
+      if (!used.has(slot)) return slot
+    }
+    return undefined
+  }
+
+  /**
+   * Adopt every PostgreSQL row into the workspace registry by path. A wiped
+   * KV store mints a new registry id; the row is updated to that id so slots
+   * and list stay aligned with the durable directory.
+   */
+  private async restoreRegistry(): Promise<void> {
+    const result = await this.client().query(
+      'SELECT id, account_id, title, path FROM cloud_workspaces ORDER BY slot ASC',
+    )
+    this.owners.clear()
+    for (const row of result.rows) {
+      const id = row['id']
+      const account = row['account_id']
+      const title = row['title']
+      const path = row['path']
+      if (
+        typeof id !== 'string'
+        || typeof account !== 'string'
+        || typeof title !== 'string'
+        || typeof path !== 'string'
+      ) continue
+      await mkdir(path, { recursive: true })
+      const canonical = await realpath(path)
+      const entity = await this.ctx.workspaceRegistry.create(canonical, title)
+      if (entity.title !== title) await entity.setTitle(title)
+      if (entity.id !== id || entity.path !== canonical) {
+        await this.client().query(
+          'UPDATE cloud_workspaces SET id = $1, path = $2, title = $3, updated_at = $4 WHERE id = $5',
+          [entity.id, entity.path, entity.title, Date.now(), id],
+        )
+      }
+      this.owners.set(entity.id, account as AccountId)
+    }
+  }
+
+  private client(): SqlClient {
+    if (this.sql === undefined) throw new Error('workspace-cloud: not started')
+    return this.sql
+  }
+}
+
+export default CloudWorkspaces

@@ -11,6 +11,62 @@
 
 `Requires:` 行列出插件通过 `inject` 注入的服务键：其 `cordis.yml` 树还必须加载这些服务的提供者。范围限定为 harness 层级（`packages/`）；配置树还可能加载的 vendored cordis 插件（`hmr`、控制台日志记录器等）固定为上游源代码（参见 [vendoring policy](../vendor/README.md)），未收录于此目录。
 
+<a id="deepseek-aidsh-account-http"></a>
+
+## `@deepseek-ai/dsh-account-http`
+
+需要：`webServer` · `accounts`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /** Set the cookie Secure flag (HTTPS reverse-proxy deployments). */
+  cookieSecure?: boolean
+  /**
+   * When true, Deletion fails unless `cloudWorkspaces`, `credentials`, and
+   * `sessionPersistence` are composed. The hosted patch sets this; auth-only
+   * tests leave it false so a row-only composition still deletes the Account.
+   */
+  requireOwnedErase?: boolean
+}
+```
+
+来源：[`packages/account/account-http/src/index.ts:22`](../packages/account/account-http/src/index.ts)
+
+<a id="deepseek-aidsh-account-postgres"></a>
+
+## `@deepseek-ai/dsh-account-postgres`
+
+需要：`mailer`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Origin used to build verification and password-reset URLs (no trailing slash). */
+  publicBaseUrl: string
+  /** Verification-token lifetime in milliseconds. */
+  verificationTtlMs?: number
+  /** Sign-in session lifetime in milliseconds. */
+  signInTtlMs?: number
+  /** Password-reset token lifetime in milliseconds. */
+  passwordResetTtlMs?: number
+  /** Minimum accepted Password length. */
+  passwordMinLength?: number
+  /**
+   * Account emails that are Operators. Compared after `normalizeEmail`.
+   * Empty means no Operators; the first registrant is not special.
+   */
+  operatorEmails?: string[]
+}
+```
+
+来源：[`packages/account/account-postgres/src/index.ts:51`](../packages/account/account-postgres/src/index.ts)
+
 <a id="deepseek-aidsh-acp"></a>
 
 ## `@deepseek-ai/dsh-acp`
@@ -420,7 +476,7 @@ export interface ConnectionConfig {
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:62`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -557,6 +613,22 @@ export interface Config {
 
 来源：[`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/extensions/cordis-host-runner/src/index.ts)
 
+<a id="deepseek-aidsh-credentials-account"></a>
+
+## `@deepseek-ai/dsh-credentials-account`
+
+Requires: `accounts`
+
+```ts config-catalog
+/** Plugin config: storage location. */
+export interface Config {
+  /** Harness home used when resolving the credentials directory; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
+}
+```
+
+来源：[`packages/credentials/credentials-account/src/index.ts:43`](../packages/credentials/credentials-account/src/index.ts)
+
 <a id="deepseek-aidsh-credentials-local"></a>
 
 ## `@deepseek-ai/dsh-credentials-local`
@@ -590,10 +662,21 @@ export interface Config {
   cwd?: string
   /** E2B sandbox lifetime in milliseconds; expiry always deletes the sandbox. */
   timeoutMs?: number
+  /**
+   * When true, sandboxes are created per Executing Session (one per Account)
+   * rather than one eager process-wide sandbox. Hosted control plane sets this.
+   */
+  perExecutingSession?: boolean
+  /**
+   * Minutes of sandbox-running time each Account may use per UTC day.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
+   */
+  dailyCapMinutes?: number
 }
 ```
 
-来源：[`packages/e2b/e2b/src/index.ts:43`](../packages/e2b/e2b/src/index.ts)
+来源：[`packages/e2b/e2b/src/index.ts:46`](../packages/e2b/e2b/src/index.ts)
 
 <a id="deepseek-aidsh-experimental-agent-team"></a>
 
@@ -797,7 +880,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-host-apiproxy`
 
-需要：`agentDefaultModel` · `agents` · `attachments` · `directoryPicker` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
+需要：`agentDefaultModel` · `agents` · `attachments` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
 
 ```ts config-catalog
 /** Gateway plugin configuration. */
@@ -1367,6 +1450,34 @@ export interface LspLocalServerConfig {
 ```
 
 来源：[`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src/index.ts)
+
+<a id="deepseek-aidsh-mailer-smtp"></a>
+
+## `@deepseek-ai/dsh-mailer-smtp`
+
+```ts config-catalog
+/** Plugin config: SMTP transport. Missing host or from fails at load. */
+export interface Config {
+  /** SMTP server hostname. */
+  host: string
+  /** SMTP port; defaults to 587. */
+  port?: number
+  /** Use TLS from the first byte (typically port 465). */
+  secure?: boolean
+  /** From address on every message. */
+  from: string
+  /** SMTP AUTH username, when the server requires it. */
+  username?: string
+  /** SMTP AUTH password, when the server requires it. */
+  password?: string
+  /** Allow AUTH PLAIN on a socket that is not TLS. Defaults to false. */
+  allowPlaintextAuth?: boolean
+  /** Deadline in milliseconds for one send, including connect. */
+  timeoutMs?: number
+}
+```
+
+来源：[`packages/account/mailer-smtp/src/index.ts:17`](../packages/account/mailer-smtp/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-client"></a>
 
@@ -3220,6 +3331,37 @@ export interface Config {
 
 来源：[`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-workspace-cloud"></a>
+
+## `@deepseek-ai/dsh-workspace-cloud`
+
+需要：`workspaceRegistry`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Control-plane directory that holds per-Account Workspace trees. */
+  root: string
+  /**
+   * Wall-clock bound for one Import clone. Defaults to
+   * {@link IMPORT_CLONE_TIMEOUT_MS}.
+   */
+  importTimeoutMs?: number
+  /**
+   * Skip TLS verify on Import clone. Default false; tests set true for a
+   * self-signed local git-http-backend. Production must leave this false.
+   */
+  importTlsInsecure?: boolean
+}
+```
+
+来源：[`packages/workspace/workspace-cloud/src/index.ts:89`](../packages/workspace/workspace-cloud/src/index.ts)
+
 ## 无配置的可加载插件
 
 这些插件通过 `cordis.yml` 中不含 `config:` 块的条目加载；它们未声明任何配置接口。
@@ -3231,6 +3373,7 @@ export interface Config {
 - `@deepseek-ai/dsh-client-locale`（[`packages/client/locale/src/index.ts`](../packages/client/locale/src/index.ts)）
 - `@deepseek-ai/dsh-client-modules` — 需要 `webServer` · `loader`（[`packages/client/modules/src/index.ts`](../packages/client/modules/src/index.ts)）
 - `@deepseek-ai/dsh-client-runtime`（[`packages/client/runtime/src/index.ts`](../packages/client/runtime/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-account`（[`packages/client/ui-account/src/index.ts`](../packages/client/ui-account/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-agent-preset`（[`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-attachment`（[`packages/client/ui-attachment/src/index.ts`](../packages/client/ui-attachment/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-brand-official`（[`packages/client/ui-brand-official/src/index.ts`](../packages/client/ui-brand-official/src/index.ts)）
@@ -3299,6 +3442,7 @@ export interface Config {
 
 抽象服务类——部署时应改为加载具体的实现包（参见[能力 seam](../.agents/notes/implemented/architecture/2026-06-13-capability-seams.zh.md)）。
 
+- `@deepseek-ai/dsh-account` — 抽象 `Accounts`（[`packages/account/account/src/index.ts`](../packages/account/account/src/index.ts)）
 - `@deepseek-ai/dsh-attachment` — 抽象 `AttachmentStore`（[`packages/attachment/attachment/src/index.ts`](../packages/attachment/attachment/src/index.ts)）
 - `@deepseek-ai/dsh-code-runtime` — 抽象 `CodeRuntime`（[`packages/code-runtime/code-runtime/src/index.ts`](../packages/code-runtime/code-runtime/src/index.ts)）
 - `@deepseek-ai/dsh-compaction` — 抽象 `CompactionEngine`（[`packages/compaction/compaction/src/index.ts`](../packages/compaction/compaction/src/index.ts)）
@@ -3307,6 +3451,7 @@ export interface Config {
 - `@deepseek-ai/dsh-fs` — 抽象 `FileSystem`（[`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker` — 抽象 `DirectoryPicker`（[`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts)）
 - `@deepseek-ai/dsh-jobs` — 抽象 `JobRegistry`（[`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts)）
+- `@deepseek-ai/dsh-mailer` — 抽象 `Mailer`（[`packages/account/mailer/src/index.ts`](../packages/account/mailer/src/index.ts)）
 - `@deepseek-ai/dsh-sandbox` — 抽象 `SandboxProvider`（[`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts)）
 - `@deepseek-ai/dsh-session-persistence` — 抽象 `SessionPersistence`（[`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts)）
 - `@deepseek-ai/dsh-session-query` — 抽象 `SessionQueryEngine`（[`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts)）
@@ -3334,6 +3479,7 @@ export interface Config {
 - `@deepseek-ai/dsh-code-runtime-python`（[`packages/code-runtime/code-runtime-python/src/index.ts`](../packages/code-runtime/code-runtime-python/src/index.ts)）
 - `@deepseek-ai/dsh-home-paths`（[`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts)）
 - `@deepseek-ai/dsh-hook-protocol`（[`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts)）
+- `@deepseek-ai/dsh-hosted`（[`packages/bundle/hosted/src/index.ts`](../packages/bundle/hosted/src/index.ts)）
 - `@deepseek-ai/dsh-launch-environment`（[`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts)）
 - `@deepseek-ai/dsh-llm-mock-server`（[`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts)）
 - `@deepseek-ai/dsh-loader-smoke`（[`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts)）

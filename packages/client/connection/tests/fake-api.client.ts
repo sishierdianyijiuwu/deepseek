@@ -155,6 +155,10 @@ export class FakeApiClient implements IApiClient {
       workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
       created: true,
     }))),
+    import: (payload: unknown) => this.record('workspace.import', payload, Promise.resolve(ok({
+      workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
+      created: true,
+    }))),
     rename: (payload: unknown) => this.record('workspace.rename', payload, Promise.resolve(ok({
       workspace: { workspaceId: 'fk-ws' as never, path: '/f/ws', title: 'ws', sessionIds: [], createdAt: '0', updatedAt: '0' },
     }))),
@@ -168,6 +172,9 @@ export class FakeApiClient implements IApiClient {
     archiveSession: (payload: unknown) => this.record('workspace.archiveSession', payload, Promise.resolve(ok({
       archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId],
     }))),
+    write: (payload: unknown) => this.record('workspace.write', payload, Promise.resolve(ok({ written: true as const }))),
+    listFiles: (payload: unknown) => this.record('workspace.listFiles', payload, Promise.resolve(ok({ paths: [] }))),
+    read: (payload: unknown) => this.record('workspace.read', payload, Promise.resolve(ok({ data: '' }))),
   }
 
   // Payloads stay `unknown` (lint-lane note above); response rows are the real

@@ -20,11 +20,11 @@ Shared lifecycle owner for one E2B sandbox. The filesystem and subprocess adapte
   name: '@deepseek-ai/dsh-fs-e2b'
 ```
 
-`apiKey` is optional and otherwise reads `E2B_API_KEY`; the key configures the host SDK connection and is never installed in the sandbox. `cwd` defaults to `/home/user/workspace` and must be an absolute POSIX path. `timeoutMs` defaults to five minutes and controls the sandbox lifetime; expiry deletes the sandbox.
+`apiKey` is optional and otherwise reads `E2B_API_KEY`; the key configures the host SDK connection and is never installed in the sandbox. `cwd` defaults to `/home/user/workspace` and must be an absolute POSIX path. `timeoutMs` defaults to five minutes and controls the sandbox lifetime; expiry deletes the sandbox. `perExecutingSession` (default false) creates one sandbox per Account Executing Session instead of one process-wide sandbox; a second Session is refused with `ExecutingSessionBusyError` until `stopExecutingSession`. `dailyCapMinutes` (default 60) is the hosted per-Account sandbox-running cap per UTC day; Host `session.prompt` / `subagent.prompt` enforce it when `ctx.accounts` is composed. `startExecutingSession` / `stopExecutingSession` run `onCreated` / `onStopped` on the per-Account chain. `startExecutingSession` returns `{ sandbox, reused }`. `executingSandbox` is the live handle Host waiters compare. Sandbox expiry does not delete a durable Workspace.
 
 ## Lifecycle and ownership
 
-Construction starts one sandbox creation. Before resolving `getSandbox()`, the service creates `cwd` and the private `cwd/.dsh-e2b` adapter-state directory, verifies that the reserved path is a real directory rather than a symlink or another file type, then sets it to mode `0700`. Each adapter-internal E2B command shell receives a fresh randomized root-level `HOME`, so the SDK's fixed login shell does not resolve profile files from the mutable user home before the control command.
+Unless `perExecutingSession` is set, construction starts one sandbox creation. Before resolving `getSandbox()`, the service creates `cwd` and the private `cwd/.dsh-e2b` adapter-state directory, verifies that the reserved path is a real directory rather than a symlink or another file type, then sets it to mode `0700`. Hosted mode creates that sandbox in `startExecutingSession` instead. Each adapter-internal E2B command shell receives a fresh randomized root-level `HOME`, so the SDK's fixed login shell does not resolve profile files from the mutable user home before the control command.
 
 Disposal first prevents new handle acquisition, then awaits setup and deletes the sandbox. A `SandboxNotFoundError` means expiry or another owner already deleted it and is accepted as quiescence. Initial directory setup failure makes one deletion attempt; the configured E2B timeout bounds a second failure. Provider plugins must load after this owner and dispose before it.
 
@@ -40,5 +40,5 @@ No direct invalidation; this package does not contribute request tokens.
 
 - **This is not a whole-harness runtime** — Cordis services, agent/session state, session logs, LLM requests, skills, and SDK-side buffers stay in the host process.
 - **Sandbox state is ephemeral** — disposal and timeout delete the sandbox; reconnect, pause/leave retention, templates, volumes, and snapshots are outside this POC.
-- **No deployment platform is configured** — network policy, host-workspace synchronization, and sandbox discovery are outside this POC.
+- **Hosted hydrate is owned by workspace-cloud** — this package creates and deletes sandboxes; durable Workspace copy is not this owner.
 - **`cwd` is a resolution convention, not containment** — adapters and commands can address other sandbox paths; E2B network access retains the base image's policy.

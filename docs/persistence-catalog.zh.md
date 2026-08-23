@@ -1007,3 +1007,20 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```
 
 来源：[`packages/web/web-search-deepseek/src/provider.ts:83`](../packages/web/web-search-deepseek/src/provider.ts)
+
+### `workspace/*`
+
+<a id="workspacecopy-back-failed--log-only"></a>
+
+#### `workspace/copy-back-failed` — log-only
+
+```ts persistence-catalog
+/**
+ * Copy-back of the execution-world tree into the durable Workspace failed.
+ * Quota refusals leave the durable copy unchanged; other failures may be
+ * partial. Log-only.
+ */
+'workspace/copy-back-failed': { message: string; maxBytes: number }
+```
+
+来源：[`packages/workspace/workspace-cloud/src/sync.ts:24`](../packages/workspace/workspace-cloud/src/sync.ts)

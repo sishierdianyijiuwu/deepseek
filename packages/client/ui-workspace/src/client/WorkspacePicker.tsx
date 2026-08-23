@@ -4,9 +4,8 @@
  * wrapped by WorkspacePicker for the conversation empty-state slot
  * registration. Directory picking itself lives in the composed flow package's
  * slot occupant (see the contract module doc): this core only opens the flow,
- * adopts the picked path, and owns the error surface. Adding a workspace has
- * exactly one route — pick a host directory, new or existing — because the
- * occupant's own create-folder affordance already covers creating one.
+ * adopts the picked path, and owns the error surface. Local add picks a host
+ * directory. Cloud `emptyCreate` creates an empty Workspace without a picker.
  */
 import type { ReactNode, RefObject } from 'react'
 import { useCallback, useEffect, useState } from 'react'
@@ -32,8 +31,8 @@ export interface WorkspacePickFlowProps {
   anchorRef?: RefObject<HTMLElement | null> | undefined
   /** Selector hook over the workspace list (framework standard hook). */
   useWorkspaces: <S>(selector: (state: WorkspaceListState) => S) => S
-  /** Adopt a picked host directory as a real Workspace. */
-  createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /** Adopt a picked host directory, or create an empty cloud Workspace. */
+  createWorkspace: (input: { path?: string; title?: string }) => Promise<WorkspaceView>
   /** Bound occupancy selector hook for this surface's directory-flow hole (empty leaves the surface with no add action). */
   useDirectoryFlow: SnapshotSelectorHook<boolean>
   /** Render this surface's directory-flow hole with the owner conversation (the entry's narrowed renderSlot). */
@@ -71,6 +70,7 @@ export function WorkspacePickFlow({
 }: WorkspacePickFlowProps) {
   const workspaceSnapshot = useWorkspaces(state => state)
   const workspaces = workspaceSnapshot.items
+  const emptyCreate = workspaceSnapshot.emptyCreate === true
   const getAnchorRect = useCallback(
     () => anchorRef?.current?.getBoundingClientRect() ?? null,
     [anchorRef],
@@ -98,7 +98,7 @@ export function WorkspacePickFlow({
   useEffect(() => {
     if (flowOpen && !flowAvailable) setFlowOpen(false)
   }, [flowOpen, flowAvailable])
-  const addEntries: MenuEntry[] = flowAvailable
+  const addEntries: MenuEntry[] = flowAvailable || emptyCreate
     ? [{ id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutline16 size={16} />, disabled: flowBusy }]
     : []
   // With workspaces listed, the add action pins below the scroll region
@@ -149,7 +149,7 @@ export function WorkspacePickFlow({
   // loading status instead of jumping into a flow the arriving list would have
   // made unnecessary; the add-only surface lists nothing and never waits.
   const listSettled = addOnly || workspaceSnapshot.phase === 'ready'
-  const addIsTheOnlyEntry = !pinAdd && listSettled && addEntries.length === 1
+  const addIsTheOnlyEntry = !emptyCreate && !pinAdd && listSettled && addEntries.length === 1
   // `flowBusy` gates this exactly as it disables the equivalent menu entry: a
   // pick still being adopted owns the surface until it settles.
   useEffect(() => {
@@ -174,6 +174,17 @@ export function WorkspacePickFlow({
 
   const handleSelect = (id: string): void => {
     if (id === ADD_WORKSPACE) {
+      if (emptyCreate) {
+        setPickingFolder(true)
+        void createWorkspace({}).then((workspace) => {
+          onPick(workspace.workspaceId)
+        }).catch((reason: unknown) => {
+          setModalError(reason instanceof Error ? reason.message : String(reason))
+          setErrorOpen(true)
+        }).finally(() => { setPickingFolder(false) })
+        onClose()
+        return
+      }
       openDirectoryFlow()
       return
     }
@@ -206,7 +217,12 @@ export function WorkspacePickFlow({
             <Button variant="outline" className={css.modalAction} onClick={closeModal}>{t('cancel')}</Button>
             {/* Retrying needs an occupant to serve the flow; without one the
               * button would open a flow nobody can answer or cancel. */}
-            <Button variant="primary" className={css.modalAction} disabled={!flowAvailable} onClick={openDirectoryFlow}>{t('folderError.retry')}</Button>
+            <Button
+              variant="primary"
+              className={css.modalAction}
+              disabled={emptyCreate ? flowBusy : !flowAvailable}
+              onClick={emptyCreate ? () => { closeModal(); handleSelect(ADD_WORKSPACE) } : openDirectoryFlow}
+            >{t('folderError.retry')}</Button>
           </>
         )}
       >

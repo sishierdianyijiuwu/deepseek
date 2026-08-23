@@ -13,6 +13,8 @@ export type WorkspaceListPhase = 'pending' | 'ready'
 /** Immutable workspace-list snapshot. */
 export interface WorkspaceListSnapshot {
   items: readonly WorkspaceView[]
+  /** Host cloud-empty create (directory picker unused). */
+  emptyCreate?: boolean
   /**
    * Registry-global archive set in Host order (hidden from grouping
    * surfaces; accounting slots retained). A plain array, not a Set: public
@@ -39,6 +41,7 @@ export class WorkspaceManager {
   // Full-snapshot state (list response / unary response / changed frame all
   // carry the complete set), so deltas never merge — installs replace.
   private archivedSessionIds: readonly SessionId[] = []
+  private emptyCreate = false
   private state: WorkspaceListSnapshot['state'] = 'idle'
   private phase: WorkspaceListPhase = 'pending'
   private error: RpcError | null = null
@@ -98,6 +101,7 @@ export class WorkspaceManager {
           items = items.filter(workspace => !this.removedIds.has(workspace.workspaceId))
           for (const delta of frames) items = applyWorkspaceDelta(items, delta)
           this.installViews(items)
+          this.emptyCreate = result.value.emptyCreate === true
           if (!this.archivedSupersedesRefresh) this.installArchived(result.value.archivedSessionIds)
           this.state = 'idle'
           this.phase = 'ready'
@@ -275,6 +279,7 @@ export class WorkspaceManager {
     return {
       items: this.itemViews(),
       archivedSessionIds: this.archivedSessionIds,
+      emptyCreate: this.emptyCreate,
       state: this.state,
       phase: this.phase,
       error: this.error,

@@ -82,6 +82,128 @@ export interface TypeApiEntry {
 /** Every harness `ctx.<key>` service, sorted by key. */
 export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
+    key: 'accounts',
+    summary: 'Abstract Account service.',
+    description: 'Abstract Account service. Subclass, implement the methods, and load the subclass as a plugin — it registers as `ctx.accounts`.',
+    methods: [
+      {
+        signature: 'abstract register(email: string, password: string): Promise<RegisterResult>',
+        description: 'Create an Unverified Account and send a verification message.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
+        returns: '`{ ok: true }` when the Unverified Account exists and the verification message was sent; `mail_failed` when the row exists but the mailer rejected the send; `registration_frozen` when an Operator has disabled public registration.',
+      },
+      {
+        signature: 'abstract verifyEmail(token: string): Promise<VerifyEmailResult>',
+        description: 'Consume a single-use verification token from the mailbox link.',
+        parameters: [{ name: 'token', description: 'raw token from the verification URL.' }],
+        returns: 'whether the Account is now verified.',
+      },
+      {
+        signature: 'abstract resendVerification(email: string): Promise<void>',
+        description: 'Send a fresh verification message when the email belongs to an Unverified Account. Unknown or already-verified addresses are a silent success so the call cannot enumerate Accounts.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }],
+      },
+      {
+        signature: 'abstract signIn(email: string, password: string): Promise<SignInResult>',
+        description: 'Create a Sign-in session after a verified Account presents the Password. Unknown emails and wrong Passwords share one failure so the call cannot enumerate Accounts. An Unverified Account with the correct Password is a distinct failure. A Banned Account with the correct Password is `banned`.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }, { name: 'password', description: 'visitor-supplied Password.' }],
+        returns: 'a Sign-in session id on success.',
+      },
+      {
+        signature: 'abstract signOut(signInId: SignInSessionId): Promise<void>',
+        description: 'End one Sign-in session. Unknown ids are a no-op.',
+        parameters: [{ name: 'signInId', description: 'the id the browser presented.' }],
+      },
+      {
+        signature: 'abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>',
+        description: 'Resolve a presented Sign-in session id to the owning Account. A live Sign-in session is slid forward by the configured lifetime.',
+        parameters: [{ name: 'signInId', description: 'the id the browser presented.' }],
+        returns: 'the live Sign-in session, or `undefined` when it is unknown, expired, or the Account is Banned.',
+      },
+      {
+        signature: 'abstract requestPasswordReset(email: string): Promise<void>',
+        description: 'Send a password-reset message when the email belongs to a verified Account. Unknown or Unverified addresses are a silent success so the call cannot enumerate Accounts.',
+        parameters: [{ name: 'email', description: 'visitor-supplied email.' }],
+      },
+      {
+        signature: 'abstract resetPassword(token: string, password: string): Promise<ResetPasswordResult>',
+        description: 'Consume a single-use password-reset token, set a new Password, and end every Sign-in session for that Account. A Banned Account may still change the Password; `signIn` stays `banned` until the Ban is lifted.',
+        parameters: [{ name: 'token', description: 'raw token from the password-reset URL.' }, { name: 'password', description: 'visitor-supplied new Password.' }],
+        returns: 'whether the Password was changed.',
+      },
+      {
+        signature: 'abstract ban(email: string): Promise<BanResult>',
+        description: 'Ban an Account by email. Sign-in and live Sign-in sessions stop; the Account row remains. Idempotent when already Banned. HTTP Operator routes are the authorization check; this method does not consult the operator list.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: '`{ ok: true }` when the Account exists, or `not_found`.',
+      },
+      {
+        signature: 'abstract liftBan(email: string): Promise<BanResult>',
+        description: 'Lift a Ban. Idempotent when the Account is not Banned. Leftover Sign-in sessions for that Account end so a raced insert cannot become live.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: '`{ ok: true }` when the Account exists, or `not_found`.',
+      },
+      {
+        signature: 'abstract deleteAccount(id: AccountId): Promise<DeleteResult>',
+        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, password-reset tokens, and executing-world usage rows. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials before calling this. Unknown ids are `not_found`.',
+        parameters: [{ name: 'id', description: 'opaque Account id of the signed-in caller.' }],
+        returns: '`{ ok: true }` when the row was deleted, or `not_found`.',
+      },
+      {
+        signature: 'abstract setRegistrationFrozen(frozen: boolean): Promise<void>',
+        description: 'Freeze or unfreeze public registration. Frozen `register` returns `registration_frozen` and does not insert a row.',
+        parameters: [{ name: 'frozen', description: 'whether new registration is refused.' }],
+      },
+      {
+        signature: 'abstract isRegistrationFrozen(): Promise<boolean>',
+        description: 'Whether public registration is frozen.',
+        parameters: [],
+        returns: 'true when `register` must return `registration_frozen`.',
+      },
+      {
+        signature: 'abstract lookupByEmail(email: string): Promise<AccountLookup | undefined>',
+        description: 'Look up an Account by email for Operator access. Returns existence, verified, and Ban flags with no Session bodies. Unknown emails are `undefined`. HTTP Operator routes are the authorization check.',
+        parameters: [{ name: 'email', description: 'target Account email.' }],
+        returns: 'the summary, or `undefined` when no Account exists.',
+      },
+      {
+        signature: 'abstract lookupById(id: AccountId): Promise<AccountLookup | undefined>',
+        description: 'Look up an Account by id, including Banned Accounts. Used to stamp audit rows after email lookup has already authorized the opening.',
+        parameters: [{ name: 'id', description: 'opaque Account id.' }],
+        returns: 'the summary, or `undefined` when no Account exists.',
+      },
+      {
+        signature: 'abstract recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord>',
+        description: 'Append one Operator-access opening. HTTP Operator routes authorize; this method does not consult the operator list.',
+        parameters: [{ name: 'entry', description: 'Operator, target Account, optional Session, and time.' }],
+        returns: 'the persisted row including its id.',
+      },
+      {
+        signature: 'abstract listOperatorAccess(): Promise<OperatorAuditRecord[]>',
+        description: 'List Operator-access openings, newest first.',
+        parameters: [],
+        returns: 'every audit row.',
+      },
+      {
+        signature: 'abstract beginExecutingWorld(accountId: AccountId, at: number): Promise<number>',
+        description: 'Open a sandbox-running interval for this Account. A leftover open interval is closed at `at` first. Does not enforce the daily cap.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'interval start, milliseconds since Unix epoch.' }],
+        returns: '`at`, the token later passed to {@link endExecutingWorld}.',
+      },
+      {
+        signature: 'abstract endExecutingWorld(accountId: AccountId, startedAt: number, at: number): Promise<void>',
+        description: 'Close the sandbox-running interval identified by `startedAt` and add the elapsed time to each overlapped UTC day. A missing or already-replaced interval is a no-op.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'startedAt', description: 'token returned by {@link beginExecutingWorld}.' }, { name: 'at', description: 'interval end, milliseconds since Unix epoch.' }],
+      },
+      {
+        signature: 'abstract executingWorldUsedMs(accountId: AccountId, at: number): Promise<number>',
+        description: 'Sandbox-running milliseconds already charged to this Account on the UTC day that contains `at`, including a still-open interval.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'at', description: 'instant whose UTC day is queried, milliseconds since Unix epoch.' }],
+        returns: 'milliseconds used on that UTC day.',
+      },
+    ],
+  },
+  {
     key: 'agentDefaultModel',
     summary: 'Owns the default model selection independently of any Host or transport.',
     description: 'Owns the default model selection independently of any Host or transport. The composition entry remains usable without a settings provider; when one is mounted, its user layer is read live.',
@@ -539,6 +661,86 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'cloudWorkspaces',
+    summary: 'Cloud Workspace store (`ctx.cloudWorkspaces`).',
+    description: 'Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or Import a public HTTPS git remote into a new slot namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.',
+    methods: [
+      {
+        signature: 'owns(accountId: AccountId, workspaceId: WorkspaceId): boolean',
+        description: 'Whether `workspaceId` is a cloud Workspace owned by `accountId`.',
+        parameters: [{ name: 'accountId', description: 'signed-in Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'true when the in-memory ownership map agrees.',
+      },
+      {
+        signature: 'async createEmpty(accountId: AccountId, title?: string): Promise<Workspace>',
+        description: 'Create an empty Workspace directory for `accountId`.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'title', description: 'display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.' }],
+        returns: 'the registry Workspace after the PG row and directory exist.',
+      },
+      {
+        signature: 'async importPublicGit( accountId: AccountId, gitUrl: string, title?: string, signal?: AbortSignal, ): Promise<Workspace>',
+        description: 'Import a public HTTPS git remote into a new owned Workspace slot. Clone runs in an unlisted directory under the Account prefix; the registry row is created only after clone and the 1 GiB check succeed. Private, credential-bearing, and non-HTTPS remotes throw CloudWorkspaceImportUrlError before `git` runs. A fourth Workspace throws CloudWorkspaceLimitError. A tree past 1 GiB throws CloudWorkspaceQuotaError. Clone failure throws CloudWorkspaceImportError. Failed ingest does not keep a slot.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'gitUrl', description: 'public HTTPS git URL.' }, { name: 'title', description: 'display title; omitted or blank uses the repo basename.' }, { name: 'signal', description: 'optional abort from the unary RPC.' }],
+        returns: 'the registry Workspace after clone and the size check.',
+      },
+      {
+        signature: 'listOwned(accountId: AccountId): Workspace[]',
+        description: 'Registry Workspaces this Account owns, in durable registry order.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'owned Workspaces that still exist in the registry.',
+      },
+      {
+        signature: 'getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined',
+        description: 'Look up one owned Workspace.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'the registry Workspace, or `undefined` when missing or not owned.',
+      },
+      {
+        signature: 'async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean>',
+        description: 'Delete an owned Workspace: PostgreSQL row, registry registration, and durable files. Waits for in-flight `writeFile` calls on this id, then removes the tree.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'true when a row was deleted.',
+      },
+      {
+        signature: 'async deleteAllOwned(accountId: AccountId): Promise<void>',
+        description: 'Delete every Workspace this Account owns, then remove the Account prefix directory. A planted symlink at that prefix is unlinked rather than followed.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+      },
+      {
+        signature: 'async writeFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, data: Uint8Array, ): Promise<void>',
+        description: 'Write a file into an owned Workspace, refusing a tree past 1 GiB. Serialized with other writes and `deleteOwned` for the same id; a delete that already dropped the row fails as CloudWorkspaceNotFoundError.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'relativePath', description: 'file path inside the Workspace.' }, { name: 'data', description: 'bytes to write.' }],
+      },
+      {
+        signature: 'async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]>',
+        description: 'List regular files in an owned Workspace as POSIX-relative paths.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
+        returns: 'sorted relative paths.',
+      },
+      {
+        signature: 'async readFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, ): Promise<Uint8Array>',
+        description: 'Read one contained file from an owned Workspace.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'relativePath', description: 'file path inside the Workspace.' }],
+        returns: 'file bytes.',
+      },
+      {
+        signature: 'async hydrateInto( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>',
+        description: 'Copy this Account\'s durable Workspace files into an execution-world cwd.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'world', description: 'execution-world filesystem (the E2B sandbox).' }, { name: 'remoteCwd', description: 'absolute sandbox working directory.' }],
+      },
+      {
+        signature: 'async copyBackFrom( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>',
+        description: 'Replace the durable Workspace with the execution-world tree, refusing a copy past 1 GiB without growing the durable copy.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'world', description: 'execution-world filesystem (the E2B sandbox).' }, { name: 'remoteCwd', description: 'absolute sandbox working directory.' }],
+      },
+      {
+        signature: 'async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void>',
+        description: 'Persist a new display title on the PostgreSQL row after the registry write.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }, { name: 'title', description: 'new title.' }],
+      },
+    ],
+  },
+  {
     key: 'codeRuntime',
     summary: 'Registers one `ctx.codeRuntime` implementation.',
     description: 'Registers one `ctx.codeRuntime` implementation. Program, budget, abort, and substrate failures resolve in CodeRunResult; only Service Definition contract misuse rejects. Implementations bridge structured-cloneable bindings, materialize each declared namespace rejection class, treat programs as hostile peers, isolate runs from one another, and terminate and await in-flight runs during disposal.',
@@ -665,6 +867,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'every stored record, values excluded.',
       },
       {
+        signature: 'hasStoredSecret(): Promise<boolean>',
+        description: 'Whether any secret is stored for this operation\'s caller. Hosted `session.prompt` and `subagent.prompt` refuse when this is false so an Account with no Credential can still sign in. The default answers from listRecords only; providers that store references implement the reference half too.',
+        parameters: [],
+        returns: 'true when a later {@link resolve} or {@link readRecord} would observe a stored secret.',
+      },
+      {
         signature: 'abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>, ): Promise<CredentialRecord | undefined>',
         description: 'Serialized read-modify-write over one record — the only write path. `mutate` sees the record as it stands at the moment the write is exclusive, and returning `undefined` leaves the entry untouched. Exclusion holds across processes where the backing store supports it, which is what makes a token refresh safe: two processes rotating one refresh token concurrently would otherwise lose whichever wrote first.',
         parameters: [{ name: 'key', description: 'the record to modify.' }, { name: 'mutate', description: 'receives the current record and returns its replacement, or `undefined` to leave it.' }],
@@ -674,6 +882,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract deleteRecord(key: CredentialKey): Promise<void>',
         description: 'Remove one record; removing an absent record is a no-op.',
         parameters: [{ name: 'key', description: 'the record to remove.' }],
+      },
+      {
+        signature: 'eraseOwned(_accountId: string): Promise<void>',
+        description: 'Erase every stored secret for one Account. Hosted Account-scoped providers delete that Account\'s document; process-env and file providers no-op. Unknown ids are a no-op. Does not require a bound Sign-in Account.',
+        parameters: [{ name: '_accountId', description: 'Account whose stored secrets should disappear.' }],
       },
     ],
   },
@@ -693,7 +906,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'e2b',
     summary: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal.',
-    description: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction; adapters await getSandbox before their first operation.',
+    description: 'Creates one lazily consumable E2B SDK handle and deletes the sandbox at timeout or disposal. Creation begins at plugin construction unless `perExecutingSession` is set, in which case startExecutingSession creates one sandbox per Account. Adapters await getSandbox before their first operation. The platform API key is never installed in a sandbox.',
     methods: [
       {
         signature: 'readonly cwd: string',
@@ -706,11 +919,45 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'readonly perExecutingSession: boolean',
+        description: 'Whether sandboxes are created per Executing Session instead of process-wide.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly dailyCapMinutes: number',
+        description: 'Minutes of sandbox-running time each Account may use per UTC day.',
+        parameters: [],
+      },
+      {
         signature: 'async getSandbox(): Promise<Sandbox>',
-        description: 'Return the shared live SDK handle.',
+        description: 'Return the live SDK handle for this caller. Process-wide mode returns the construction-time sandbox. Per-Executing-Session mode returns the Account\'s sandbox from the initiating Agent.',
         parameters: [],
         returns: 'the created sandbox after the configured cwd exists.',
-        throws: ['when E2B rejects creation or the service is disposing.'],
+        throws: ['when E2B rejects creation, the service is disposing, or no Executing Session is active.'],
+      },
+      {
+        signature: 'async startExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { onCreated?: () => Promise<void> }, ): Promise<ExecutingSessionStart>',
+        description: 'Create or reuse this Account\'s Executing Session sandbox.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the one-executing-session lock.' }, { name: 'opts', description: '.onCreated - runs on the Account chain after a new sandbox is live.' }],
+        returns: 'the live sandbox and whether this call reused an existing slot.',
+        throws: ['{@link ExecutingSessionBusyError} when another Session holds the lock.'],
+      },
+      {
+        signature: 'async stopExecutingSession( accountId: AccountId, sessionId: SessionId, opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> }, ): Promise<void>',
+        description: 'Copy-back callers then kill this Account\'s sandbox. The durable Workspace is not deleted. Missing or already-expired sandboxes are quiescence.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'sessionId', description: 'Session that holds the lock; a mismatch is ignored.' }, { name: 'opts', description: '.onStopped - runs on the Account chain after this Session\'s slot is killed.' }],
+      },
+      {
+        signature: 'executingSessionId(accountId: AccountId): SessionId | undefined',
+        description: 'The Session that currently holds this Account\'s Executing Session lock.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'the locked Session id, or `undefined`.',
+      },
+      {
+        signature: 'executingSandbox(accountId: AccountId): Sandbox | undefined',
+        description: 'Resolved live sandbox for this Account, if setup finished. Host copy-back waiters compare this object with the handle they bound.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
+        returns: 'the live sandbox, or `undefined`.',
       },
     ],
   },
@@ -1053,6 +1300,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'mailer',
+    summary: 'Abstract mailer.',
+    description: 'Abstract mailer. Subclass and load the subclass as a plugin — it registers as `ctx.mailer`.',
+    methods: [
+      {
+        signature: 'abstract send(message: MailMessage): Promise<void>',
+        description: 'Deliver one message.',
+        parameters: [{ name: 'message', description: 'recipient, subject, and plain-text body.' }],
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -1244,6 +1503,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'List materialized sessions with cheap per-log change tokens.\n\nRepeated observations of an unchanged log return the same revision. A successful mutating load repair changes the next listed revision. Revisions also distinguish independently backed stores so backend-local counters cannot compare equal across different persistence sources.',
         parameters: [{ name: 'signal', description: 'optional cancellation for backend snapshot-listing work.' }],
         returns: 'one header and opaque revision per materialized session without loading full logs.',
+      },
+      {
+        signature: 'deleteOwned(_owner: string): Promise<void>',
+        description: 'Erase every persisted Session whose header `owner` is `owner`. JSONL and SQLite providers delete those logs; backends that do not store Account-owned logs no-op. Unknown owners are a no-op.',
+        parameters: [{ name: '_owner', description: 'Account id stored as `SessionHeader.owner`.' }],
       },
     ],
   },
@@ -2842,6 +3106,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
 /** Shapes of every exported type the Service and Event signatures reference (transitively), sorted by name. */
 export const TYPE_API: readonly TypeApiEntry[] = [
   {
+    name: 'AccountId',
+    declaration: 'export type AccountId = Branded<\'AccountId\'>;',
+  },
+  {
+    name: 'AccountLookup',
+    declaration: 'export interface AccountLookup {\n    accountId: AccountId;\n    email: string;\n    verified: boolean;\n    banned: boolean;\n}',
+  },
+  {
     name: 'AdapterRegistrationHandle',
     declaration: 'export interface AdapterRegistrationHandle {\n    (): void;\n    replace(providers: string[]): void;\n}',
   },
@@ -3000,6 +3272,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'BackendRegistry',
     declaration: 'export class BackendRegistry {\n    register(name: string, backend: StorageBackend): () => void;\n    get(name: string): StorageBackend;\n    names(): string[];\n}',
+  },
+  {
+    name: 'BanResult',
+    declaration: 'export type BanResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'not_found\';\n};',
   },
   {
     name: 'BashEnvContributor',
@@ -3183,7 +3459,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CreateAgentOptions',
-    declaration: 'export interface CreateAgentOptions {\n    readonly sessionId: SessionId;\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n    readonly seed?: readonly SessionEvent[];\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
+    declaration: 'export interface CreateAgentOptions {\n    readonly sessionId: SessionId;\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n        readonly owner?: SessionOwnerId;\n    };\n    readonly seed?: readonly SessionEvent[];\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
   },
   {
     name: 'CreateGoalRequest',
@@ -3195,7 +3471,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CreateSessionOptions',
-    declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n}',
+    declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n        readonly owner?: SessionOwnerId;\n    };\n}',
   },
   {
     name: 'CreateTeamTaskRequest',
@@ -3224,6 +3500,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CredentialRef',
     declaration: 'export type CredentialRef = Branded<\'CredentialRef\'>;',
+  },
+  {
+    name: 'DeleteResult',
+    declaration: 'export type DeleteResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'not_found\';\n};',
   },
   {
     name: 'DiffCallView',
@@ -3336,6 +3616,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
+  },
+  {
+    name: 'ExecutingSessionStart',
+    declaration: 'export interface ExecutingSessionStart {\n    readonly sandbox: Sandbox;\n    readonly reused: boolean;\n}',
+  },
+  {
+    name: 'ExecutionWorld',
+    declaration: 'export interface ExecutionWorld {\n    files: ExecutionWorldFiles;\n}',
+  },
+  {
+    name: 'ExecutionWorldEntry',
+    declaration: 'export interface ExecutionWorldEntry {\n    path: string;\n    name: string;\n    type?: unknown;\n    size?: number;\n    symlinkTarget?: string;\n}',
+  },
+  {
+    name: 'ExecutionWorldFiles',
+    declaration: 'export interface ExecutionWorldFiles {\n    makeDir(path: string): Promise<unknown>;\n    write(path: string, data: string | Uint8Array | ArrayBuffer): Promise<unknown>;\n    read(path: string, opts: {\n        format: \'bytes\';\n    }): Promise<Uint8Array>;\n    list(path: string, opts: {\n        depth: number;\n    }): Promise<readonly ExecutionWorldEntry[]>;\n}',
   },
   {
     name: 'FileDiff',
@@ -3690,6 +3986,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
   },
   {
+    name: 'MailMessage',
+    declaration: 'export interface MailMessage {\n    to: string;\n    subject: string;\n    text: string;\n}',
+  },
+  {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
@@ -3806,6 +4106,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
   },
   {
+    name: 'OperatorAuditRecord',
+    declaration: 'export interface OperatorAuditRecord {\n    id: string;\n    operatorAccountId: AccountId;\n    operatorEmail: string;\n    targetAccountId: AccountId;\n    sessionId?: string;\n    openedAt: number;\n}',
+  },
+  {
+    name: 'OperatorAuditWrite',
+    declaration: 'export type OperatorAuditWrite = Omit<OperatorAuditRecord, \'id\'>;',
+  },
+  {
     name: 'PermissionSelect',
     declaration: 'export interface PermissionSelect {\n    options: PresetOption[];\n    currentValue: string;\n}',
   },
@@ -3914,6 +4222,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
   },
   {
+    name: 'RegisterResult',
+    declaration: 'export type RegisterResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_email\' | \'invalid_password\' | \'email_taken\' | \'mail_failed\' | \'registration_frozen\';\n};',
+  },
+  {
     name: 'ReplayEnvelope',
     declaration: 'export interface ReplayEnvelope {\n    response: unknown;\n    blocks?: readonly unknown[];\n}',
   },
@@ -3936,6 +4248,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RequestRunOutcome',
     declaration: 'export type RequestRunOutcome = \'approved\' | \'completed\' | \'rejected\' | \'cancelled\' | \'failed\';',
+  },
+  {
+    name: 'ResetPasswordResult',
+    declaration: 'export type ResetPasswordResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_or_expired\' | \'invalid_password\';\n};',
   },
   {
     name: 'ResolvedAlwaysRetryPolicy',
@@ -3979,7 +4295,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RpcErrorDetailsMap',
-    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset: string;\n    };\n    \'agent-preset-conflict\': {\n        sessionId: SessionId;\n        requestedPreset: string;\n        existingPreset?: string;\n    };\n    \'agent-preset-not-found\': {\n        agentPreset: string;\n      /* …truncated — full shape in source */',
+    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'workspace-required\': {};\n    \'workspace-limit\': {\n        max: number;\n    };\n    \'workspace-quota-exceeded\': {\n        maxBytes: number;\n    };\n    \'workspace-import-refused\': {\n        gitUrl: string;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset:  /* …truncated — full shape in source */',
   },
   {
     name: 'RpcId',
@@ -4147,7 +4463,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionHeader',
-    declaration: 'export interface SessionHeader {\n    readonly version: number;\n    readonly id: SessionId;\n    readonly createdAt: number;\n    readonly cwd?: string;\n    readonly parentSession?: SessionId;\n    readonly seedLength?: number;\n    readonly origin?: \'subagent\';\n    readonly delegationDepth?: number;\n    readonly agentPreset?: string;\n}',
+    declaration: 'export interface SessionHeader {\n    readonly version: number;\n    readonly id: SessionId;\n    readonly createdAt: number;\n    readonly cwd?: string;\n    readonly parentSession?: SessionId;\n    readonly seedLength?: number;\n    readonly origin?: \'subagent\';\n    readonly delegationDepth?: number;\n    readonly agentPreset?: string;\n    readonly owner?: SessionOwnerId;\n}',
   },
   {
     name: 'SessionId',
@@ -4172,6 +4488,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionLogSnapshot',
     declaration: 'export interface SessionLogSnapshot {\n    session: SessionHeader;\n    events: SessionEvent[];\n}',
+  },
+  {
+    name: 'SessionOwnerId',
+    declaration: 'export type SessionOwnerId = Branded<\'AccountId\'>;',
   },
   {
     name: 'SessionPersistenceRevision',
@@ -4368,6 +4688,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ShellSandboxInfo',
     declaration: 'export interface ShellSandboxInfo {\n    mode: SandboxMode;\n    denied: boolean;\n    enforcement?: SandboxEnforcement;\n    runnerFailed?: boolean;\n}',
+  },
+  {
+    name: 'SignInLookup',
+    declaration: 'export interface SignInLookup {\n    accountId: AccountId;\n    email: string;\n    expiresAt: number;\n    operator: boolean;\n}',
+  },
+  {
+    name: 'SignInResult',
+    declaration: 'export type SignInResult = {\n    ok: true;\n    signInId: SignInSessionId;\n    expiresAt: number;\n} | {\n    ok: false;\n    error: \'invalid_credentials\' | \'unverified\' | \'banned\';\n};',
+  },
+  {
+    name: 'SignInSessionId',
+    declaration: 'export type SignInSessionId = Branded<\'SignInSessionId\'>;',
   },
   {
     name: 'SkillCandidate',
@@ -4936,6 +5268,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UserQuestionProvider',
     declaration: 'export interface UserQuestionProvider {\n    ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>;\n}',
+  },
+  {
+    name: 'VerifyEmailResult',
+    declaration: 'export type VerifyEmailResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'invalid_or_expired\';\n};',
   },
   {
     name: 'WebBootEntry',

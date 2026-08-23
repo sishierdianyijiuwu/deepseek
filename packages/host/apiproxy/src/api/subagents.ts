@@ -93,6 +93,9 @@ export interface SubagentsApi {
    * parent's continuation owner. Success identifies the message accepted by
    * the child's FIFO inbox; later execution is independent of this request.
    * Optional browser-zone provenance is validated and logged on that message.
+   * When Accounts are composed, an Account with no stored model Credential is
+   * refused with `credential-missing`. Exhausted daily execution-world time is
+   * refused with `e2b-cap-exhausted`.
    */
   prompt(
     request: RpcRequest<

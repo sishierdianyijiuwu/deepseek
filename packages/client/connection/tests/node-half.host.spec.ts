@@ -6,12 +6,98 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import {
+  Accounts,
+  accountId,
+  SIGN_IN_COOKIE,
+  type AccountId,
+  type AccountLookup,
+  type BanResult,
+  type DeleteResult,
+  type OperatorAuditRecord,
+  type OperatorAuditWrite,
+  type RegisterResult,
+  type ResetPasswordResult,
+  type SignInLookup,
+  type SignInResult,
+  type SignInSessionId,
+  type VerifyEmailResult,
+} from '@deepseek-ai/dsh-account'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { RpcId, type ClientRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { API_PATH, apply, HOST_EVENTS_PATH, inject, MUX_EVENTS_PATH, type HostConnectionHandle } from '../src/index.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
+
+class FakeAccounts extends Accounts {
+  override register(): Promise<RegisterResult> {
+    return Promise.resolve({ ok: true })
+  }
+  override verifyEmail(): Promise<VerifyEmailResult> {
+    return Promise.resolve({ ok: true })
+  }
+  override resendVerification(): Promise<void> {
+    return Promise.resolve()
+  }
+  override signIn(): Promise<SignInResult> {
+    return Promise.resolve({ ok: false, error: 'invalid_credentials' })
+  }
+  override signOut(_signInId: SignInSessionId): Promise<void> {
+    return Promise.resolve()
+  }
+  override lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined> {
+    if (signInId !== 'live') return Promise.resolve(undefined)
+    return Promise.resolve({
+      accountId: accountId('account-a'),
+      email: 'a@example.com',
+      expiresAt: Date.now() + 60_000,
+      operator: false,
+    })
+  }
+  override requestPasswordReset(): Promise<void> {
+    return Promise.resolve()
+  }
+  override resetPassword(): Promise<ResetPasswordResult> {
+    return Promise.resolve({ ok: false, error: 'invalid_or_expired' })
+  }
+  override ban(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override deleteAccount(): Promise<DeleteResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override setRegistrationFrozen(): Promise<void> {
+    return Promise.resolve()
+  }
+  override isRegistrationFrozen(): Promise<boolean> {
+    return Promise.resolve(false)
+  }
+  override lookupByEmail(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override lookupById(): Promise<AccountLookup | undefined> {
+    return Promise.resolve(undefined)
+  }
+  override recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
+    return Promise.resolve({ id: 'audit-1', ...entry })
+  }
+  override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
+    return Promise.resolve([])
+  }
+  override beginExecutingWorld(_id: AccountId, at: number): Promise<number> {
+    return Promise.resolve(at)
+  }
+  override endExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override executingWorldUsedMs(): Promise<number> {
+    return Promise.resolve(0)
+  }
+}
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -196,6 +282,36 @@ describe('connection node half', () => {
     await routes[0]!.handler(fakeRequest({ host: 'harness.example' }), read.response)
     expect(read.state.status).not.toBe(403)
     await dispose()
+  })
+
+  it('authorizes credential methods with the Sign-in session when Accounts are composed', async () => {
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    ctx.provide('apiProxy', {} as unknown as ApiProxy)
+    await ctx.plugin(FakeAccounts)
+    const fiber = ctx.plugin({ inject: [...inject], apply }, { trustedHosts: ['harness.example'] })
+    await fiber.await()
+    const host = { host: 'harness.example', origin: 'http://harness.example', 'sec-fetch-site': 'same-origin' }
+    for (const method of ['credentials.describe', 'credentials.set', 'credentials.unset']) {
+      const anonymous = fakeResponse()
+      await routes[0]!.handler(fakeRequest(host, `${API_PATH}/${method}`), anonymous.response)
+      expect(anonymous.state.status).toBe(401)
+      const signedIn = fakeResponse()
+      await routes[0]!.handler(
+        fakeRequest({ ...host, cookie: `${SIGN_IN_COOKIE}=live` }, `${API_PATH}/${method}`),
+        signedIn.response,
+      )
+      expect(signedIn.state.status).not.toBe(403)
+    }
+    const settings = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({ ...host, cookie: `${SIGN_IN_COOKIE}=live` }, `${API_PATH}/settings.describe`),
+      settings.response,
+    )
+    expect(settings.state.status).toBe(403)
+    await fiber.dispose()
   })
 
   it('passes loopback and declared-authority requests through to the bridge', async () => {

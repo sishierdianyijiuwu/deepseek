@@ -1,0 +1,19 @@
+# TLS reverse proxy in front of a host-run `dsh hosted` on 127.0.0.1:3080.
+# dsh is not a service here: it must keep binding loopback on the host.
+# `network_mode: host` is how this Caddy process reaches that loopback port (Linux).
+# On Docker Desktop, run Caddy on the host with the sibling Caddyfile instead.
+
+services:
+  reverse-proxy:
+    image: caddy:2.10.2-alpine
+    network_mode: host
+    environment:
+      DSH_PUBLIC_HOST: ${DSH_PUBLIC_HOST:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -9,6 +9,62 @@ This file is GENERATED from source (`scripts/gen-config-catalog.ts`) and verifie
 
 A `Requires:` line lists the service keys the plugin `inject`s: its `cordis.yml` tree must also load providers for those services. Scope is the harness tier (`packages/`); the vendored cordis plugins a config tree may also load (`hmr`, the console logger, …) are pinned upstream source ([vendoring policy](../vendor/README.md)) and not catalogued here.
 
+<a id="deepseek-aidsh-account-http"></a>
+
+## `@deepseek-ai/dsh-account-http`
+
+Requires: `webServer` · `accounts`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /** Set the cookie Secure flag (HTTPS reverse-proxy deployments). */
+  cookieSecure?: boolean
+  /**
+   * When true, Deletion fails unless `cloudWorkspaces`, `credentials`, and
+   * `sessionPersistence` are composed. The hosted patch sets this; auth-only
+   * tests leave it false so a row-only composition still deletes the Account.
+   */
+  requireOwnedErase?: boolean
+}
+```
+
+Source: [`packages/account/account-http/src/index.ts:22`](../packages/account/account-http/src/index.ts)
+
+<a id="deepseek-aidsh-account-postgres"></a>
+
+## `@deepseek-ai/dsh-account-postgres`
+
+Requires: `mailer`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Origin used to build verification and password-reset URLs (no trailing slash). */
+  publicBaseUrl: string
+  /** Verification-token lifetime in milliseconds. */
+  verificationTtlMs?: number
+  /** Sign-in session lifetime in milliseconds. */
+  signInTtlMs?: number
+  /** Password-reset token lifetime in milliseconds. */
+  passwordResetTtlMs?: number
+  /** Minimum accepted Password length. */
+  passwordMinLength?: number
+  /**
+   * Account emails that are Operators. Compared after `normalizeEmail`.
+   * Empty means no Operators; the first registrant is not special.
+   */
+  operatorEmails?: string[]
+}
+```
+
+Source: [`packages/account/account-postgres/src/index.ts:51`](../packages/account/account-postgres/src/index.ts)
+
 <a id="deepseek-aidsh-acp"></a>
 
 ## `@deepseek-ai/dsh-acp`
@@ -418,7 +474,7 @@ export interface ConnectionConfig {
 }
 ```
 
-Source: [`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+Source: [`packages/client/connection/src/index.ts:62`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -555,6 +611,22 @@ export interface Config {
 
 Source: [`packages/extensions/cordis-host-runner/src/index.ts:88`](../packages/extensions/cordis-host-runner/src/index.ts)
 
+<a id="deepseek-aidsh-credentials-account"></a>
+
+## `@deepseek-ai/dsh-credentials-account`
+
+Requires: `accounts`
+
+```ts config-catalog
+/** Plugin config: storage location. */
+export interface Config {
+  /** Harness home used when resolving the credentials directory; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
+}
+```
+
+Source: [`packages/credentials/credentials-account/src/index.ts:43`](../packages/credentials/credentials-account/src/index.ts)
+
 <a id="deepseek-aidsh-credentials-local"></a>
 
 ## `@deepseek-ai/dsh-credentials-local`
@@ -588,10 +660,21 @@ export interface Config {
   cwd?: string
   /** E2B sandbox lifetime in milliseconds; expiry always deletes the sandbox. */
   timeoutMs?: number
+  /**
+   * When true, sandboxes are created per Executing Session (one per Account)
+   * rather than one eager process-wide sandbox. Hosted control plane sets this.
+   */
+  perExecutingSession?: boolean
+  /**
+   * Minutes of sandbox-running time each Account may use per UTC day.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
+   */
+  dailyCapMinutes?: number
 }
 ```
 
-Source: [`packages/e2b/e2b/src/index.ts:43`](../packages/e2b/e2b/src/index.ts)
+Source: [`packages/e2b/e2b/src/index.ts:46`](../packages/e2b/e2b/src/index.ts)
 
 <a id="deepseek-aidsh-experimental-agent-team"></a>
 
@@ -795,7 +878,7 @@ Source: [`packages/hooks/hooks-codex/src/index.ts:44`](../packages/hooks/hooks-c
 
 ## `@deepseek-ai/dsh-host-apiproxy`
 
-Requires: `agentDefaultModel` · `agents` · `attachments` · `directoryPicker` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
+Requires: `agentDefaultModel` · `agents` · `attachments` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
 
 ```ts config-catalog
 /** Gateway plugin configuration. */
@@ -1365,6 +1448,34 @@ export interface LspLocalServerConfig {
 ```
 
 Source: [`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src/index.ts)
+
+<a id="deepseek-aidsh-mailer-smtp"></a>
+
+## `@deepseek-ai/dsh-mailer-smtp`
+
+```ts config-catalog
+/** Plugin config: SMTP transport. Missing host or from fails at load. */
+export interface Config {
+  /** SMTP server hostname. */
+  host: string
+  /** SMTP port; defaults to 587. */
+  port?: number
+  /** Use TLS from the first byte (typically port 465). */
+  secure?: boolean
+  /** From address on every message. */
+  from: string
+  /** SMTP AUTH username, when the server requires it. */
+  username?: string
+  /** SMTP AUTH password, when the server requires it. */
+  password?: string
+  /** Allow AUTH PLAIN on a socket that is not TLS. Defaults to false. */
+  allowPlaintextAuth?: boolean
+  /** Deadline in milliseconds for one send, including connect. */
+  timeoutMs?: number
+}
+```
+
+Source: [`packages/account/mailer-smtp/src/index.ts:17`](../packages/account/mailer-smtp/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-client"></a>
 
@@ -3218,6 +3329,37 @@ export interface Config {
 
 Source: [`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
+<a id="deepseek-aidsh-workspace-cloud"></a>
+
+## `@deepseek-ai/dsh-workspace-cloud`
+
+Requires: `workspaceRegistry`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Control-plane directory that holds per-Account Workspace trees. */
+  root: string
+  /**
+   * Wall-clock bound for one Import clone. Defaults to
+   * {@link IMPORT_CLONE_TIMEOUT_MS}.
+   */
+  importTimeoutMs?: number
+  /**
+   * Skip TLS verify on Import clone. Default false; tests set true for a
+   * self-signed local git-http-backend. Production must leave this false.
+   */
+  importTlsInsecure?: boolean
+}
+```
+
+Source: [`packages/workspace/workspace-cloud/src/index.ts:89`](../packages/workspace/workspace-cloud/src/index.ts)
+
 ## Loadable plugins with no config
 
 These load from a `cordis.yml` entry with no `config:` block; they declare no configuration API.
@@ -3229,6 +3371,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-locale` ([`packages/client/locale/src/index.ts`](../packages/client/locale/src/index.ts))
 - `@deepseek-ai/dsh-client-modules` — requires `webServer` · `loader` ([`packages/client/modules/src/index.ts`](../packages/client/modules/src/index.ts))
 - `@deepseek-ai/dsh-client-runtime` ([`packages/client/runtime/src/index.ts`](../packages/client/runtime/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-account` ([`packages/client/ui-account/src/index.ts`](../packages/client/ui-account/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-agent-preset` ([`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-attachment` ([`packages/client/ui-attachment/src/index.ts`](../packages/client/ui-attachment/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-brand-official` ([`packages/client/ui-brand-official/src/index.ts`](../packages/client/ui-brand-official/src/index.ts))
@@ -3297,6 +3440,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 
 Abstract service classes — a deployment loads a concrete implementation package instead ([capability seams](../.agents/notes/implemented/architecture/2026-06-13-capability-seams.md)).
 
+- `@deepseek-ai/dsh-account` — abstract `Accounts` ([`packages/account/account/src/index.ts`](../packages/account/account/src/index.ts))
 - `@deepseek-ai/dsh-attachment` — abstract `AttachmentStore` ([`packages/attachment/attachment/src/index.ts`](../packages/attachment/attachment/src/index.ts))
 - `@deepseek-ai/dsh-code-runtime` — abstract `CodeRuntime` ([`packages/code-runtime/code-runtime/src/index.ts`](../packages/code-runtime/code-runtime/src/index.ts))
 - `@deepseek-ai/dsh-compaction` — abstract `CompactionEngine` ([`packages/compaction/compaction/src/index.ts`](../packages/compaction/compaction/src/index.ts))
@@ -3305,6 +3449,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-fs` — abstract `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker` — abstract `DirectoryPicker` ([`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts))
 - `@deepseek-ai/dsh-jobs` — abstract `JobRegistry` ([`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts))
+- `@deepseek-ai/dsh-mailer` — abstract `Mailer` ([`packages/account/mailer/src/index.ts`](../packages/account/mailer/src/index.ts))
 - `@deepseek-ai/dsh-sandbox` — abstract `SandboxProvider` ([`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts))
 - `@deepseek-ai/dsh-session-persistence` — abstract `SessionPersistence` ([`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts))
 - `@deepseek-ai/dsh-session-query` — abstract `SessionQueryEngine` ([`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts))
@@ -3333,6 +3478,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-code-runtime-python` ([`packages/code-runtime/code-runtime-python/src/index.ts`](../packages/code-runtime/code-runtime-python/src/index.ts))
 - `@deepseek-ai/dsh-home-paths` ([`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts))
 - `@deepseek-ai/dsh-hook-protocol` ([`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts))
+- `@deepseek-ai/dsh-hosted` ([`packages/bundle/hosted/src/index.ts`](../packages/bundle/hosted/src/index.ts))
 - `@deepseek-ai/dsh-launch-environment` ([`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts))
 - `@deepseek-ai/dsh-llm-mock-server` ([`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts))
 - `@deepseek-ai/dsh-loader-smoke` ([`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts))

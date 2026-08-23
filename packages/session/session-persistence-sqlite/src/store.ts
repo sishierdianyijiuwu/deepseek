@@ -246,6 +246,22 @@ export class SqliteStore implements PersistenceBackend<number> {
   }
 
   /**
+   * Delete every session row whose header owner matches. Events CASCADE.
+   * @param owner - Account id stored as `SessionHeader.owner`.
+   */
+  async deleteOwned(owner: string): Promise<void> {
+    await this.open()
+    this.db.exec(sql('begin-immediate'))
+    try {
+      validateSchemaForMutation(this.databaseConstructor, this.db, this.databasePath)
+      this.db.prepare(sql('delete-sessions-by-owner')).run(owner)
+      this.db.exec(sql('commit'))
+    } catch (error: unknown) {
+      this.rollback(error, 'delete-owned')
+    }
+  }
+
+  /**
    * Return every materialized header with its source-qualified revision.
    * @param signal - optional cancellation before or after the metadata query.
    * @returns stored headers and revisions without loading event rows.
@@ -378,6 +394,7 @@ export class SqliteStore implements PersistenceBackend<number> {
       meta.origin ?? null,
       meta.delegationDepth ?? null,
       meta.agentPreset ?? null,
+      meta.owner ?? null,
       randomUUID(),
     )
   }

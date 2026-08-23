@@ -27,6 +27,9 @@
       "path": "../../api/remotes/tsconfig.host.json"
     },
     {
+      "path": "../../account/account"
+    },
+    {
       "path": "../../util/brand"
     },
     {
@@ -88,6 +91,12 @@
     },
     {
       "path": "../../workspace/workspace"
+    },
+    {
+      "path": "../../workspace/workspace-cloud"
+    },
+    {
+      "path": "../../e2b/e2b"
     },
     {
       "path": "../directory-picker"

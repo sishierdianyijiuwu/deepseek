@@ -2,7 +2,7 @@
 
 [English](credentials.md) | 中文
 
-[dsh-credentials](../../packages/credentials/credentials) 的凭据 seam 把机密挡在配置之外：settings 分节与 `cordis.yml` 条目携带的是*引用*（环境变量名），值归 [dsh-credentials-local](../../packages/credentials/credentials-local) 这类提供方所有，消费方每个操作解析一次引用——LLM（大语言模型）适配器每次模型请求解析一次，因此轮换后的凭据无需任何重启即可作用于紧随其后的下一次请求。一条 seam 级规则约束每个提供方：空的存储值在任何地方都视为不存在。
+[dsh-credentials](../../packages/credentials/credentials) 的凭据 seam 把机密挡在配置之外：settings 分节与 `cordis.yml` 条目携带的是*引用*（环境变量名），值归 [dsh-credentials-local](../../packages/credentials/credentials-local)（本机）和 [dsh-credentials-account](../../packages/credentials/credentials-account)（托管，每个已登录 Account 一份文档，不含进程环境层）这类提供方所有，消费方每个操作解析一次引用——LLM（大语言模型）适配器每次模型请求解析一次，因此轮换后的凭据无需任何重启即可作用于紧随其后的下一次请求。一条 seam 级规则约束每个提供方：空的存储值在任何地方都视为不存在。托管部署的 `session.prompt` 与 `subagent.prompt` 在 `hasStoredSecret()` 为 false 时拒绝，因此没有 Credential 的 Account 仍可登录。
 
 来源：[`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)
 
@@ -191,6 +191,17 @@ abstract describeRecord(key: CredentialKey): Promise<CredentialRecordInfo>
 abstract listRecords(): Promise<readonly CredentialRecordEntry[]>
 
 /**
+ * Whether any secret is stored for this operation's caller. Hosted
+ * `session.prompt` and `subagent.prompt` refuse when this is false so an
+ * Account with no Credential can still sign in. The default answers from
+ * {@link listRecords} only; providers that store references implement the
+ * reference half too.
+ * @returns true when a later {@link resolve} or {@link readRecord} would
+ *   observe a stored secret.
+ */
+hasStoredSecret(): Promise<boolean>
+
+/**
  * Serialized read-modify-write over one record — the only write path.
  * `mutate` sees the record as it stands at the moment the write is
  * exclusive, and returning `undefined` leaves the entry untouched. Exclusion
@@ -208,6 +219,14 @@ abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | 
  * @param key - the record to remove.
  */
 abstract deleteRecord(key: CredentialKey): Promise<void>
+
+/**
+ * Erase every stored secret for one Account. Hosted Account-scoped providers
+ * delete that Account's document; process-env and file providers no-op.
+ * Unknown ids are a no-op. Does not require a bound Sign-in Account.
+ * @param _accountId - Account whose stored secrets should disappear.
+ */
+eraseOwned(_accountId: string): Promise<void>
 ```
 
 Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)

@@ -8,7 +8,7 @@ import type { ObservableSnapshot } from '../contract/store.ts'
 import { Notifier } from '../sessions/notifier.ts'
 
 /** Host input retained by a local Workspace until materialization succeeds. */
-export type WorkspaceCreateInput = { path: string }
+export type WorkspaceCreateInput = { path?: string; title?: string }
 
 /** Observable state of a client-local Workspace intent. */
 export interface WorkspaceIntentSnapshot {
@@ -137,6 +137,8 @@ export class Workspace implements ObservableSnapshot<WorkspaceSnapshot> {
 }
 
 function intentName(input: WorkspaceCreateInput): string {
+  if (input.title !== undefined && input.title.trim() !== '') return input.title.trim()
+  if (input.path === undefined || input.path === '') return 'Workspace'
   const trimmed = input.path.replace(/[\\/]+$/, '')
   return trimmed.split(/[\\/]/).pop() ?? input.path
 }

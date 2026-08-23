@@ -7,6 +7,7 @@
 | 包 | 职责 | ctx 键 |
 |---|---|---|
 | [`workspace/`](workspace/README.zh.md) | 注册 workspace 并记录其会话归属 | `ctx.workspaceRegistry` |
+| [`workspace-cloud/`](workspace-cloud/README.zh.md) | 托管 Workspace：空目录或公开 git Import、PostgreSQL 元数据、按 Account 命名的文件、上限 | `ctx.cloudWorkspaces` |
 
 [workspace 包参考](workspace/README.zh.md)负责生命周期、持久化和删除语义。
 

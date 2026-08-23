@@ -2663,14 +2663,17 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         archivedSessionIds: [...archivedSessionIds],
       }),
       create: (request) => {
-        const { path } = request.payload
+        const path = request.payload.path ?? `/cloud/ws-${String(nextWorkspace)}`
         const existing = workspaces.find(w => w.path === path)
         if (existing !== undefined) return ok(request, { workspace: { ...existing }, created: false })
         const now = new Date().toISOString()
+        const title = request.payload.title?.trim()
+          || path.split('/').filter(Boolean).at(-1)
+          || path
         const created: WorkspaceView = {
           workspaceId: wid(`fx-ws-${nextWorkspace++}`),
           path,
-          title: path.split('/').filter(Boolean).at(-1) ?? path,
+          title,
           sessionIds: [],
           createdAt: now,
           updatedAt: now,
@@ -2788,6 +2791,14 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         }
         return ok(request, { archivedSessionIds: [...archivedSessionIds] })
       },
+      write: request => ok(request, { written: true as const }),
+      listFiles: request => ok(request, { paths: [] }),
+      read: request => ok(request, { data: '' }),
+      import: request => err(request, {
+        code: 'workspace-import-refused',
+        message: 'git Import requires cloud Workspaces',
+        details: { gitUrl: request.payload.gitUrl },
+      }),
     },
     agentPresets: {
       // Both trusts appear, because a surface must present a locally authored
@@ -3198,11 +3209,15 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'host.openPath': return this.api.host.openPath(request, new AbortController().signal)
       case 'workspace.list': return this.api.workspace.list(request)
       case 'workspace.create': return this.api.workspace.create(request)
+      case 'workspace.import': return this.api.workspace.import(request, signal)
       case 'workspace.rename': return this.api.workspace.rename(request)
       case 'workspace.delete': return this.api.workspace.delete(request)
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
+      case 'workspace.write': return this.api.workspace.write(request)
+      case 'workspace.listFiles': return this.api.workspace.listFiles(request)
+      case 'workspace.read': return this.api.workspace.read(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

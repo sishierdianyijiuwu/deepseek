@@ -5,7 +5,7 @@ import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, stat, sym
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionOwnerId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import {
   encodeSegment, eventLines, logPath, projectDir, projectKey, scanLog, sessionDir, SessionLogScanner, toHeaderLine,
@@ -285,6 +285,20 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect((await stat(dir)).isDirectory()).toBe(true)
     expect((await stat(rawLogPath(root, '/work', m.id))).isFile()).toBe(true)
     expect((await ctx.sessionPersistence.list()).map(h => h.id)).toContain(m.id)
+  })
+
+  it('deleteOwned removes only sessions whose header owner matches', async () => {
+    const owned = { ...meta('owned', '/work'), owner: 'account-a' as SessionOwnerId }
+    const other = { ...meta('other', '/work'), owner: 'account-b' as SessionOwnerId }
+    await ctx.sessionPersistence.create(owned)
+    await ctx.sessionPersistence.append(owned.id, oneTurnLog())
+    await ctx.sessionPersistence.create(other)
+    await ctx.sessionPersistence.append(other.id, oneTurnLog())
+    await ctx.sessionPersistence.deleteOwned('account-a')
+    expect((await ctx.sessionPersistence.list()).map(h => h.id)).toEqual([other.id])
+    await expect(stat(rawLogPath(root, '/work', owned.id))).rejects.toThrow()
+    expect((await stat(rawLogPath(root, '/work', other.id))).isFile()).toBe(true)
+    await ctx.sessionPersistence.deleteOwned('account-a')
   })
 
   it('readRaw returns the stored artifact text verbatim with its original filename', async () => {
@@ -940,6 +954,25 @@ describe('JsonlSessionPersistence: scanLog unit', () => {
     // The preset decides the resumed session's tools and prompt; dropping it
     // on disk would restore a composition the logged history contradicts.
     expect(scanLog(Buffer.from(log)).meta.agentPreset).toBe('minimal')
+  })
+
+  it('round-trips the Account owner a hosted Session was created under', () => {
+    const line = toHeaderLine({
+      version: 0,
+      id: SessionId('owned'),
+      createdAt: 1,
+      delegationDepth: 0,
+      owner: 'account-1' as SessionOwnerId,
+    })
+    const log = `${JSON.stringify(line)}\n`
+    expect(scanLog(Buffer.from(log)).meta.owner).toBe('account-1')
+  })
+
+  it('rejects a session header whose owner is empty or not a string', () => {
+    const empty = '{"type":"session","version":0,"id":"empty-owner","createdAt":1,"delegationDepth":0,"owner":""}\n'
+    const numbered = '{"type":"session","version":0,"id":"bad-owner","createdAt":1,"delegationDepth":0,"owner":7}\n'
+    expect(() => scanLog(Buffer.from(empty))).toThrow(/session header/)
+    expect(() => scanLog(Buffer.from(numbered))).toThrow(/session header/)
   })
 
   it('rejects a session header whose agentPreset is not a string', () => {

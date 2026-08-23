@@ -212,6 +212,7 @@ export class FakeApiClient implements IApiClient {
         : response
     )) as ReturnType<IApiClient['workspace']['list']>),
     create: (payload: unknown) => this.record('workspace.create', payload, this.onWorkspaceCreate(payload)),
+    import: (payload: unknown) => this.record('workspace.import', payload, this.onWorkspaceCreate(payload)),
     rename: (payload: unknown) => this.record('workspace.rename', payload, this.onWorkspaceRename(payload)),
     delete: (payload: unknown) => this.record('workspace.delete', payload, this.onWorkspaceDelete(payload)),
     insertBefore: (payload: unknown) =>
@@ -220,6 +221,12 @@ export class FakeApiClient implements IApiClient {
       this.record('workspace.insertSessionBefore', payload, this.onWorkspaceInsertSessionBefore(payload)),
     archiveSession: (payload: unknown) =>
       this.record('workspace.archiveSession', payload, this.onWorkspaceArchiveSession(payload)),
+    write: (payload: unknown) =>
+      this.record('workspace.write', payload, Promise.resolve(ok({ written: true as const }))),
+    listFiles: (payload: unknown) =>
+      this.record('workspace.listFiles', payload, Promise.resolve(ok({ paths: [] }))),
+    read: (payload: unknown) =>
+      this.record('workspace.read', payload, Promise.resolve(ok({ data: '' }))),
   }
 
   // Payloads stay `unknown` (lint-lane note above); response rows are the real

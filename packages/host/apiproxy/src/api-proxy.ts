@@ -9,6 +9,12 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
+import {
+  currentAccountId,
+  currentOperatorAccess,
+  viewingAccountId,
+  type AccountId,
+} from '@deepseek-ai/dsh-account'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -17,7 +23,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
+import { foldRequestHeader, isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
@@ -29,6 +35,21 @@ import {
   workspaceDomainState, workspaceRecord, WorkspaceId as brandWorkspaceId,
   WorkspaceMoveInvalidError, WorkspaceOrderInvalidError, WorkspaceUnknownSessionError,
 } from '@deepseek-ai/dsh-workspace'
+import type {} from '@deepseek-ai/dsh-workspace-cloud'
+import {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
+  CloudWorkspaceLimitError,
+  CloudWorkspaceNotFoundError,
+  CloudWorkspacePathError,
+  CloudWorkspaceQuotaError,
+  MAX_WORKSPACE_BYTES,
+  MAX_WORKSPACES_PER_ACCOUNT,
+  redactGitUrl,
+  type ExecutionWorld,
+} from '@deepseek-ai/dsh-workspace-cloud'
+import type {} from '@deepseek-ai/dsh-e2b'
+import { ExecutingSessionBusyError } from '@deepseek-ai/dsh-e2b'
 // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
 import {
   InvalidPresetIdError, PresetExistsError, PresetMountError,
@@ -37,10 +58,10 @@ import {
 import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {
-  ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
+  ApiProxy, ConfigurableProviderView, CredentialView, DirectoryListing, GoalRef, HistoryEntry, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
-  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
+  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, SubagentPromptReceipt, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
 } from './api/index.ts'
 import {
@@ -1025,6 +1046,22 @@ function workspaceView(workspace: Workspace): WorkspaceView {
   }
 }
 
+/**
+ * Registry Workspace visible to the current viewer. Cloud Workspaces hide
+ * another Account's ids as not found.
+ */
+function visibleWorkspace(ctx: Context, id: WorkspaceId): Workspace | undefined {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined) return undefined
+  const workspace = registry.get(id)
+  if (workspace === undefined) return undefined
+  const cloud = ctx.get('cloudWorkspaces')
+  if (cloud === undefined) return workspace
+  const viewer = viewingAccountId()
+  if (viewer === undefined || !cloud.owns(viewer, workspace.id)) return undefined
+  return workspace
+}
+
 /** Wire projection of the durable record carried by `domain/changed`. */
 function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceView {
   const record: WorkspaceRecord = workspaceRecord.parse(value)
@@ -1070,8 +1107,376 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   let workspaceCreationChain = Promise.resolve()
   const pendingQuestions = new Map<RpcId, PendingQuestion>()
   const pendingApprovals = new Map<RpcId, PendingApproval>()
-  const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
+  interface MuxSubscriber {
+    readonly queue: FrameQueue<RpcRequest<MuxFrame>>
+    readonly viewer: AccountId | undefined
+  }
+  const muxSubscribers = new Set<MuxSubscriber>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+
+  function isolationActive(): boolean {
+    return ctx.get('accounts') !== undefined
+  }
+
+  function refuseOperatorWrite<T>(request: RpcRequest<unknown>): RpcResponse<T> | undefined {
+    if (currentOperatorAccess() === undefined) return undefined
+    return err(request, {
+      code: 'operator-access-readonly',
+      message: 'Operator access is read-only; prompt, tool execution, and Credential secret read are refused',
+      details: {},
+    })
+  }
+
+  async function recordOperatorOpening(sessionId?: SessionId): Promise<void> {
+    const access = currentOperatorAccess()
+    const accounts = ctx.get('accounts')
+    if (access === undefined || accounts === undefined) return
+    await accounts.recordOperatorAccess({
+      operatorAccountId: access.operatorAccountId,
+      operatorEmail: access.operatorEmail,
+      targetAccountId: access.targetAccountId,
+      ...sessionId === undefined ? {} : { sessionId },
+      openedAt: Date.now(),
+    })
+  }
+
+  /**
+   * Hosted prompt refusal: an Account with no stored model Credential cannot
+   * send a Session message. Visibility checks run first so a guessed id stays
+   * `session-not-found`.
+   * @param request - the RPC whose response should carry `credential-missing`.
+   * @returns the error response, or `undefined` when prompting may continue.
+   */
+  async function refuseMissingCredential<T>(request: RpcRequest<unknown>): Promise<RpcResponse<T> | undefined> {
+    if (!isolationActive()) return undefined
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined || !await credentials.hasStoredSecret()) {
+      return err(request, {
+        code: 'credential-missing',
+        message: 'this Account has no model Credential; save one in Settings → Models',
+        details: {},
+      })
+    }
+    return undefined
+  }
+
+  const executingCopyBack = new Map<SessionId, ExecutingBind['sandbox']>()
+  const executingHolds = new Map<SessionId, number>()
+  const executingDrains = new Set<Promise<void>>()
+
+  const drainExecutingCopyBack = (): (() => Promise<void>) => async () => {
+    await Promise.all([...executingDrains])
+  }
+  ctx.effect(drainExecutingCopyBack, 'hosted executing-session copy-back drain')
+  ctx.inject(['e2b'], (e2bCtx) => {
+    if (e2bCtx.e2b.perExecutingSession !== true) return
+    e2bCtx.effect(drainExecutingCopyBack, 'hosted executing-session copy-back drain')
+  })
+
+  function familyRootId(sessionId: SessionId): SessionId {
+    let current = sessionId
+    const seen = new Set<SessionId>()
+    for (;;) {
+      if (seen.has(current)) return current
+      seen.add(current)
+      const session = ctx.sessions.get(current) ?? ctx.agents.get(current)?.session
+      const parent = session?.header.parentSession
+      if (parent === undefined) return current
+      current = parent
+    }
+  }
+
+  function workspaceForOwnedSession(accountId: AccountId, sessionId: SessionId): Workspace | undefined {
+    const cloud = ctx.get('cloudWorkspaces')
+    if (cloud === undefined) return undefined
+    const session = ctx.sessions.get(sessionId) ?? ctx.agents.get(sessionId)?.session
+    return cloud.listOwned(accountId).find(workspace =>
+      workspace.sessionIds.includes(sessionId)
+      || (session?.header.cwd !== undefined && workspace.path === session.header.cwd),
+    )
+  }
+
+  interface ExecutingBind {
+    account: AccountId
+    rootId: SessionId
+    workspace: Workspace
+    sandbox: Awaited<ReturnType<Context['e2b']['startExecutingSession']>>['sandbox']
+    reused: boolean
+    intervalStartedAt?: number
+  }
+
+  function addExecutingHold(rootId: SessionId): void {
+    executingHolds.set(rootId, (executingHolds.get(rootId) ?? 0) + 1)
+  }
+
+  function releaseExecutingHold(rootId: SessionId): void {
+    const held = executingHolds.get(rootId) ?? 0
+    if (held <= 1) executingHolds.delete(rootId)
+    else executingHolds.set(rootId, held - 1)
+  }
+
+  function runningFamilyAgents(rootId: SessionId): Agent[] {
+    return ctx.agents.list().filter(agent =>
+      agent.status === 'running' && familyRootId(agent.session.id) === rootId,
+    )
+  }
+
+  function familyBusy(rootId: SessionId): boolean {
+    return (executingHolds.get(rootId) ?? 0) > 0 || runningFamilyAgents(rootId).length > 0
+  }
+
+  async function whenFamilyIdle(rootId: SessionId): Promise<void> {
+    for (;;) {
+      const running = runningFamilyAgents(rootId)
+      if (running.length === 0) return
+      await Promise.all(running.map(agent =>
+        typeof agent.whenIdle === 'function' ? agent.whenIdle() : Promise.resolve(),
+      ))
+    }
+  }
+
+  function nextUtcDayStartMs(at: number): number {
+    const day = new Date(at).toISOString().slice(0, 10)
+    return Date.parse(`${day}T00:00:00.000Z`) + 86_400_000
+  }
+
+  async function endExecutingInterval(bind: ExecutingBind): Promise<void> {
+    const startedAt = bind.intervalStartedAt
+    if (startedAt === undefined) return
+    await ctx.get('accounts')?.endExecutingWorld(bind.account, startedAt, Date.now())
+  }
+
+  async function stopExecutingWorld(
+    bind: ExecutingBind,
+    opts?: { skipIf?: () => boolean },
+  ): Promise<void> {
+    const e2b = ctx.get('e2b')
+    /* v8 ignore next 3 -- Executing Session start already required e2b. */
+    if (e2b === undefined) {
+      await endExecutingInterval(bind)
+      return
+    }
+    if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+      await endExecutingInterval(bind)
+      return
+    }
+    let endedOnChain = false
+    await e2b.stopExecutingSession(bind.account, bind.rootId, {
+      skipIf: () =>
+        opts?.skipIf?.() === true
+        || e2b.executingSandbox(bind.account) !== bind.sandbox,
+      onStopped: async () => {
+        endedOnChain = true
+        await endExecutingInterval(bind)
+      },
+    })
+    if (e2b.executingSandbox(bind.account) === bind.sandbox) return
+    if (!endedOnChain) await endExecutingInterval(bind)
+  }
+
+  /**
+   * Start the Account's E2B Executing Session and hydrate the durable Workspace.
+   * Extra prompts of the same family reuse the sandbox. A second family is refused.
+   */
+  async function startExecutingWorld<T>(
+    request: RpcRequest<unknown>,
+    agent: Agent,
+  ): Promise<{ refused: RpcResponse<T> } | { bind: ExecutingBind | undefined }> {
+    const e2b = ctx.get('e2b')
+    const cloud = ctx.get('cloudWorkspaces')
+    const account = currentAccountId()
+    if (e2b === undefined || !e2b.perExecutingSession || cloud === undefined || account === undefined) {
+      return { bind: undefined }
+    }
+    const rootId = familyRootId(agent.session.id)
+    const workspace = workspaceForOwnedSession(account, rootId)
+      ?? workspaceForOwnedSession(account, agent.session.id)
+    if (workspace === undefined) {
+      return {
+        refused: err(request, {
+          code: 'workspace-required',
+          message: 'an Executing Session requires a Workspace owned by this Account',
+          details: {},
+        }),
+      }
+    }
+    const now = Date.now()
+    const capMinutes = e2b.dailyCapMinutes
+    if (e2b.executingSessionId(account) === undefined) {
+      const used = await ctx.get('accounts')?.executingWorldUsedMs(account, now) ?? 0
+      if (used >= capMinutes * 60_000) {
+        return {
+          refused: err(request, {
+            code: 'e2b-cap-exhausted',
+            message: `this Account has used its ${String(capMinutes)} minutes of execution-world time for this UTC day`,
+            details: { capMinutes, resetsAt: nextUtcDayStartMs(now) },
+          }),
+        }
+      }
+    }
+    addExecutingHold(rootId)
+    let sandbox: ExecutingBind['sandbox']
+    let reused: boolean
+    let intervalStartedAt: number | undefined
+    try {
+      const started = await e2b.startExecutingSession(account, rootId, {
+        onCreated: async () => {
+          const at = Date.now()
+          intervalStartedAt = at
+          await ctx.get('accounts')?.beginExecutingWorld(account, at)
+        },
+      })
+      sandbox = started.sandbox
+      reused = started.reused
+    } catch (error: unknown) {
+      releaseExecutingHold(rootId)
+      if (error instanceof ExecutingSessionBusyError) {
+        return {
+          refused: err(request, {
+            code: 'executing-session-busy',
+            message: error.message,
+            details: { sessionId: error.sessionId },
+          }),
+        }
+      }
+      throw error
+    }
+    const bind: ExecutingBind = {
+      account, rootId, workspace, sandbox, reused,
+      ...intervalStartedAt === undefined ? {} : { intervalStartedAt },
+    }
+    try {
+      if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+    } catch (error: unknown) {
+      releaseExecutingHold(rootId)
+      await stopExecutingWorld(bind)
+      throw error
+    }
+    return { bind }
+  }
+
+  async function abandonExecutingWorld(bind: ExecutingBind): Promise<void> {
+    releaseExecutingHold(bind.rootId)
+    if (bind.reused || executingCopyBack.has(bind.rootId) || familyBusy(bind.rootId)) return
+    await stopExecutingWorld(bind, {
+      skipIf: () => familyBusy(bind.rootId),
+    })
+  }
+
+  function scheduleExecutingCopyBack(agent: Agent, bind: ExecutingBind): void {
+    const e2b = ctx.get('e2b')
+    const cloud = ctx.get('cloudWorkspaces')
+    releaseExecutingHold(bind.rootId)
+    if (e2b === undefined || cloud === undefined) return
+    if (executingCopyBack.get(bind.rootId) === bind.sandbox) return
+    executingCopyBack.set(bind.rootId, bind.sandbox)
+    const drain = (async () => {
+      try {
+        for (;;) {
+          await whenFamilyIdle(bind.rootId)
+          if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+            await endExecutingInterval(bind)
+            return
+          }
+          try {
+            await cloud.copyBackFrom(
+              bind.account,
+              bind.workspace.id,
+              bind.sandbox as ExecutionWorld,
+              e2b.cwd,
+            )
+          } catch (error: unknown) {
+            try {
+              agent.session.append('workspace/copy-back-failed', {
+                message: error instanceof Error ? error.message : String(error),
+                maxBytes: MAX_WORKSPACE_BYTES,
+              })
+            } catch (_copyBackNoticeFailed) {
+              // Durable copy-back already failed; the session notice is best-effort.
+            }
+            ctx.logger.warn(
+              `executing session copy-back failed: ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+          if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) !== bind.sandbox) {
+            await endExecutingInterval(bind)
+            return
+          }
+          await stopExecutingWorld(bind, {
+            skipIf: () => familyBusy(bind.rootId),
+          })
+          if (familyBusy(bind.rootId)) continue
+          if (e2b.executingSandbox(bind.account) === bind.sandbox) continue
+          return
+        }
+      } finally {
+        if (executingCopyBack.get(bind.rootId) === bind.sandbox) {
+          executingCopyBack.delete(bind.rootId)
+        }
+      }
+    })()
+    executingDrains.add(drain)
+    void drain.finally(() => { executingDrains.delete(drain) })
+  }
+
+  function workspaceRegistry() {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry === undefined) throw new Error('workspace registry is not composed')
+    return registry
+  }
+
+  function filterArchivedSessionIds(
+    ids: readonly SessionId[],
+    viewer: AccountId | undefined = viewingAccountId(),
+  ): SessionId[] {
+    if (!isolationActive()) return [...ids]
+    if (viewer === undefined) return []
+    const cloud = ctx.get('cloudWorkspaces')
+    const accounted = new Set(
+      (cloud === undefined ? workspaceRegistry().list() : cloud.listOwned(viewer))
+        .flatMap(workspace => workspace.sessionIds),
+    )
+    return ids.filter((id) => {
+      const live = ctx.sessions.get(id)
+      if (live !== undefined) return headerVisibleTo(live.header, viewer)
+      return accounted.has(id)
+    })
+  }
+
+  function visibleArchivedSessionIds(viewer: AccountId | undefined = viewingAccountId()): SessionId[] {
+    return filterArchivedSessionIds(workspaceRegistry().archivedSessionIds, viewer)
+  }
+
+  function cloudDirectoryBlocked<T>(request: RpcRequest<unknown>): RpcResponse<T> | undefined {
+    if (ctx.get('cloudWorkspaces') === undefined) return undefined
+    return err(request, {
+      code: 'directory-picker-unavailable',
+      message: 'hosted Workspaces are not host directories; native and browse picking are not available',
+      details: { capability: 'cloud' },
+    })
+  }
+
+  function headerVisibleTo(header: SessionHeader, viewer: AccountId | undefined): boolean {
+    if (!isolationActive()) return true
+    return viewer !== undefined && header.owner === viewer
+  }
+
+  function headerVisible(header: SessionHeader): boolean {
+    return headerVisibleTo(header, viewingAccountId())
+  }
+
+  function visibleSessionIdTo(sessionId: SessionId, viewer: AccountId | undefined): boolean {
+    const live = ctx.sessions.get(sessionId)
+    if (live !== undefined) return headerVisibleTo(live.header, viewer)
+    if (!isolationActive()) return true
+    return false
+  }
+
+  function assertHeaderVisible(header: SessionHeader, sessionId: SessionId): void {
+    if (!headerVisible(header)) throw new SessionNotFound(`session "${sessionId}" not found`)
+  }
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1196,6 +1601,37 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     apiRemoteSubagentOwnershipError(sessionId)
   const inspectServable = (sessionId: SessionId): Promise<{ meta: SessionHeader; events: SessionEvent[] }> =>
     inspectApiRemoteSession(ctx, sessionId)
+
+  async function requireVisibleHeader(sessionId: SessionId): Promise<SessionHeader> {
+    const attached = ctx.sessions.get(sessionId)
+    if (attached !== undefined) {
+      assertHeaderVisible(attached.header, sessionId)
+      return attached.header
+    }
+    const inspected = await inspectServable(sessionId)
+    assertHeaderVisible(inspected.meta, sessionId)
+    return inspected.meta
+  }
+
+  /**
+   * When isolation is active, a session id that is not a live Session owned
+   * by the caller answers `session-not-found`. Cancel and updateQueue only
+   * mutate attached Agents, so this does not inspect persistence.
+   */
+  function refuseInvisibleSession(
+    request: RpcRequest<unknown>,
+    sessionId: SessionId,
+  ): RpcResponse<{ accepted: true }> | undefined {
+    if (!isolationActive()) return undefined
+    const attached = ctx.sessions.get(sessionId)
+    if (attached !== undefined && headerVisible(attached.header)) return undefined
+    return err(request, {
+      code: 'session-not-found',
+      message: `session "${sessionId}" not found`,
+      details: { sessionId },
+    })
+  }
+
   // Cold resume composes the preset the session recorded, for the same reason
   // `session.create` does: its history was produced under that composition.
   // Every generic entry point — prompt, models, commands — arrives here, so
@@ -1205,16 +1641,35 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   // composition, and the header is written once at creation. Reading the
   // header here would silently undo the switch on the next restart and
   // restore that history under the old tool set.
-  const agentFor = createApiRemoteAgentResolver(ctx, {
+  const resolveAgent = createApiRemoteAgentResolver(ctx, {
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
   })
+  const agentFor = async (sessionId: SessionId) => {
+    try {
+      await requireVisibleHeader(sessionId)
+    } catch (error: unknown) {
+      if (error instanceof SessionNotFound) {
+        return { error: { code: 'session-not-found' as const, message: error.message, details: { sessionId } } }
+      }
+      throw error
+    }
+    return resolveAgent(sessionId)
+  }
 
-  /** Send one transient frame to every connected mux consumer. */
+  /** Send one already-identified mux envelope to every subscriber that may see it. */
+  function pushMux(envelope: RpcRequest<MuxFrame>): void {
+    const sessionId = 'sessionId' in envelope.payload ? envelope.payload.sessionId : undefined
+    for (const subscriber of muxSubscribers) {
+      if (sessionId !== undefined && !visibleSessionIdTo(sessionId, subscriber.viewer)) continue
+      subscriber.queue.push(envelope)
+    }
+  }
+
+  /** Send one transient frame to every connected mux consumer that may see it. */
   function broadcast(payload: MuxFrame): void {
-    const envelope = frame(payload)
-    for (const queue of muxQueues) queue.push(envelope)
+    pushMux(frame(payload))
   }
 
   // Projection change feed → session/projection push frames. The carrier
@@ -1332,7 +1787,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           rpcId,
           payload: { type: 'question/requested', sessionId, questions: request.questions },
         }
-        for (const queue of muxQueues) queue.push(envelope)
+        pushMux(envelope)
       })
     },
   })
@@ -1424,7 +1879,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         pendingApprovals.set(pending.rpcId, pending)
         req.signal?.addEventListener('abort', onAbort, { once: true })
         const envelope = requestedFrame(pending)
-        for (const queue of muxQueues) queue.push(envelope)
+        pushMux(envelope)
       })
     })
   }
@@ -1437,6 +1892,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   /** Read one stable session prefix without acquiring an Agent owner. */
   async function readSessionState(sessionId: SessionId): Promise<SessionReadState> {
+    await requireVisibleHeader(sessionId)
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) {
       return {
@@ -1451,7 +1907,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   /** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */
   async function forkWorkspace(source: Pick<Session, 'id' | 'header'>): Promise<Workspace | undefined> {
-    const workspaces = ctx.workspaceRegistry.list()
+    const cloud = ctx.get('cloudWorkspaces')
+    const viewer = viewingAccountId()
+    const workspaces = cloud === undefined || viewer === undefined
+      ? workspaceRegistry().list()
+      : cloud.listOwned(viewer)
     const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.id))
     if (direct !== undefined || source.header.origin !== 'subagent') return direct
 
@@ -1472,6 +1932,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
   async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+    await requireVisibleHeader(sessionId)
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
     const inspected = await inspectServable(sessionId)
@@ -1567,6 +2028,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       creation = (async () => {
         const attached = ctx.sessions.get(sessionId)
         const live = ctx.agents.get(sessionId)
+        if (attached !== undefined) assertHeaderVisible(attached.header, sessionId)
         if (attached !== undefined && hasSubagentOwner(attached, live)) {
           throw new SubagentSessionOwnership(sessionId)
         }
@@ -1577,6 +2039,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           ? undefined
           : (await persistence.list()).find(header => header.id === sessionId)
         if (persistence !== undefined && stored !== undefined) {
+          assertHeaderVisible(stored, sessionId)
           const inspected = await persistence.inspect(sessionId)
           // Ownership first: explicit-id adoption of a session-backed
           // subagent must answer `agent-busy` regardless of the requested
@@ -1608,12 +2071,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
+        const owner = isolationActive() ? currentAccountId() : undefined
+        if (isolationActive() && owner === undefined) {
+          throw new Error('session.create requires a Sign-in session')
+        }
         return (await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
             cwd,
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
+            ...owner === undefined ? {} : { owner },
           },
           setup: composition.setup,
         })).agent
@@ -1622,12 +2090,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // this operation crossed an asynchronous persistence/filesystem step.
         const live = ctx.agents.get(sessionId)
         if (live !== undefined) {
+          assertHeaderVisible(live.session.header, sessionId)
           if (hasSubagentOwner(live.session, live)) throw new SubagentSessionOwnership(sessionId)
           return live
         }
         const attached = ctx.sessions.get(sessionId)
-        if (attached !== undefined && hasSubagentOwner(attached, undefined)) {
-          throw new SubagentSessionOwnership(sessionId)
+        if (attached !== undefined) {
+          assertHeaderVisible(attached.header, sessionId)
+          if (hasSubagentOwner(attached, undefined)) {
+            throw new SubagentSessionOwnership(sessionId)
+          }
         }
         throw error
       }).finally(() => {
@@ -1636,6 +2108,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       sessionCreations.set(sessionId, creation)
     }
     const agent = await creation
+    assertHeaderVisible(agent.session.header, sessionId)
     if (hasSubagentOwner(agent.session, agent)) throw new SubagentSessionOwnership(sessionId)
     // Beside the cwd check for the same reason, and after the await so it
     // covers every path that yields a live agent — freshly created, adopted
@@ -1650,9 +2123,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /** Resolve or create one path while holding the Host's workspace-create chain. */
   function ensureWorkspace(path: string): Promise<{ workspace: Workspace; created: boolean }> {
     const operation = workspaceCreationChain.then(async () => {
-      const existing = await ctx.workspaceRegistry.resolveByPath(path)
+      const existing = await workspaceRegistry().resolveByPath(path)
       if (existing !== undefined) return { workspace: existing, created: false }
-      return { workspace: await ctx.workspaceRegistry.create(path), created: true }
+      return { workspace: await workspaceRegistry().create(path), created: true }
     })
     workspaceCreationChain = operation.then(() => undefined, () => undefined)
     return operation
@@ -1673,13 +2146,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         ...projections === undefined ? {} : { projections },
       }
     }
-    const items = ctx.sessions.list().map(summarizeAttached)
+    const items = ctx.sessions.list().filter(session => headerVisible(session.header)).map(summarizeAttached)
     signal?.throwIfAborted()
     const attached = new Set(items.map(item => item.sessionId))
     const persistence = ctx.get('sessionPersistence')
     if (persistence !== undefined) {
       const cold = (await persistence.list(signal))
-        .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined)
+        .filter(meta => !attached.has(meta.id) && meta.cwd !== undefined && headerVisible(meta))
       signal?.throwIfAborted()
       for (let offset = 0; offset < cold.length; offset += COLD_SUMMARY_BATCH_SIZE) {
         signal?.throwIfAborted()
@@ -1754,6 +2227,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     request: RpcRequest<{ sessionId: SessionId }>,
     mutation: (goals: NonNullable<ReturnType<typeof ctx.get<'goals'>>>, agent: Agent) => CoreGoalRef,
   ): Promise<RpcResponse<{ ref: GoalRef }>> {
+    const blocked = refuseOperatorWrite<{ ref: GoalRef }>(request)
+    if (blocked !== undefined) return blocked
     const found = await agentFor(request.payload.sessionId)
     if ('error' in found) return err(request, found.error)
     const goals = goalServiceFor(found.agent)
@@ -1942,6 +2417,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // Logs without a cwd are not served; every session records its project
       // at create time.
       async list(request) {
+        await recordOperatorOpening()
         return ok(request, { items: await listVisibleSessionSummaries() })
       },
 
@@ -1961,6 +2437,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         try {
+          await recordOperatorOpening()
           const visible = await listVisibleSessionSummaries(signal)
           if (isAborted(signal)) return cancelled()
           if (visible.length === 0) return ok(request, { items: [], hasMore: false })
@@ -1991,6 +2468,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 ],
                 limit: requestedPageLimit,
                 ...requestedCursor === undefined ? {} : { cursor: requestedCursor },
+                ...isolationActive()
+                  ? { sessionFilters: [{ kind: 'id' as const, values: [...visibleIds] }] }
+                  : {},
               }, { signal })
             } catch (error: unknown) {
               if (isAborted(signal)) return cancelled()
@@ -2023,11 +2503,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 `session search provider returned ${providerItemCount} items; maximum is ${requestedPageLimit}`,
               )
             }
-            // Host visibility is the authorization boundary. Consume the
-            // provider's globally ranked results rather than binding every
-            // visible id into one SQLite statement, then require each hit to
-            // name a visible session and a current message from that same
-            // session before emitting its snippet.
+            // Host revalidation remains the authorization boundary. When
+            // Accounts are composed the provider query also binds visible
+            // ids; each hit must still name a visible session and a current
+            // message from that same session.
             for (const hit of page.items) {
               if (authorized.length > SESSION_SEARCH_RESULT_LIMIT) continue
               if (
@@ -2077,10 +2556,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async create(request) {
+        const blocked = refuseOperatorWrite<{
+          sessionId: SessionId
+          agentPreset?: string
+        }>(request)
+        if (blocked !== undefined) return blocked
         const sessionId = request.payload.sessionId ?? `session-${randomUUID()}` as SessionId
         let workspace: Workspace | undefined
+        if (ctx.get('cloudWorkspaces') !== undefined && request.payload.workspaceId === undefined) {
+          return err(request, {
+            code: 'workspace-required',
+            message: 'session.create requires a Workspace owned by this Account',
+            details: {},
+          })
+        }
         if (request.payload.workspaceId !== undefined) {
-          workspace = ctx.workspaceRegistry.get(brandWorkspaceId(request.payload.workspaceId))
+          workspace = visibleWorkspace(ctx, brandWorkspaceId(request.payload.workspaceId))
           if (workspace === undefined) {
             return err(request, {
               code: 'workspace-not-found',
@@ -2121,6 +2612,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           if (error instanceof SubagentSessionOwnership) {
             return err(request, subagentOwnershipError(error.sessionId))
           }
+          if (error instanceof SessionNotFound) {
+            return err(request, { code: 'session-not-found', message: error.message, details: { sessionId } })
+          }
           return err(request, {
             code: 'internal',
             message: `failed to create session "${sessionId}": ${String(error)}`,
@@ -2155,6 +2649,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
           const source = await historySourceFor(sessionId)
+          await recordOperatorOpening(sessionId)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2183,6 +2678,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async models(request) {
         const { sessionId } = request.payload
+        if (currentOperatorAccess() !== undefined) {
+          try {
+            const state = await readSessionState(sessionId)
+            await recordOperatorOpening(sessionId)
+            const logged = foldRequestHeader(state.events)?.config
+            const current: ModelSelection = logged === undefined
+              ? defaults.defaultModelSelection()
+              : {
+                provider: logged.provider,
+                model: logged.model,
+                ...logged.reasoningEffort === undefined ? {} : { reasoningEffort: logged.reasoningEffort },
+              }
+            const { groups, failures } = await buildModelCatalog(ctx)
+            return ok(request, {
+              current: { ...current },
+              routable: routeServed(current.provider),
+              groups,
+              failures,
+            })
+          } catch (error: unknown) {
+            if (error instanceof SessionNotFound) {
+              return err(request, {
+                code: 'session-not-found',
+                message: error.message,
+                details: { sessionId },
+              })
+            }
+            throw error
+          }
+        }
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
         const current = selectionFor(found.agent).current
@@ -2192,6 +2717,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async selectModel(request) {
+        const blocked = refuseOperatorWrite<{ selected: ModelSelection }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, provider, model, reasoningEffort } = request.payload
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
@@ -2231,6 +2758,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async rename(request) {
+        const blocked = refuseOperatorWrite<{ title: string; seq: number }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, title } = request.payload
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
@@ -2261,6 +2790,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async fork(request) {
+        const blocked = refuseOperatorWrite<{ sessionId: SessionId }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, atSeq } = request.payload
         let source: SessionReadState
         try {
@@ -2330,6 +2861,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               ...forkComposition.agentPreset === undefined
                 ? {}
                 : { agentPreset: forkComposition.agentPreset },
+              ...source.header.owner === undefined ? {} : { owner: source.header.owner },
             },
             agentOptions: agentOptions(),
             setup: forkComposition.setup,
@@ -2359,6 +2891,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async prompt(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) {
+          const hidden = await refuseInvisibleSession(request, request.payload.sessionId)
+          if (hidden !== undefined) return hidden
+          return blocked
+        }
         const { sessionId, mode, content, clientTimeZone } = request.payload
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
@@ -2372,6 +2910,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
+        const missing = await refuseMissingCredential<{ accepted: true }>(request)
+        if (missing !== undefined) return missing
         const agent = resolved.agent
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
@@ -2394,9 +2934,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               }
             }
             const durable = await durablePromptContent(ctx, content)
-            const message: UserMessage = createUserMessage({ content: durable, source })
-            if (mode === 'steer') agent.steer(message)
-            else agent.followup(message)
+            const executing = await startExecutingWorld<{ accepted: true }>(request, agent)
+            if ('refused' in executing) return executing.refused
+            try {
+              const message: UserMessage = createUserMessage({ content: durable, source })
+              if (mode === 'steer') agent.steer(message)
+              else agent.followup(message)
+              if (executing.bind !== undefined) scheduleExecutingCopyBack(agent, executing.bind)
+            } catch (error: unknown) {
+              if (executing.bind !== undefined) await abandonExecutingWorld(executing.bind)
+              throw error
+            }
           } catch (error: unknown) {
             if (error instanceof AttachmentError) {
               return err(request, {
@@ -2421,6 +2969,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         let state: SessionReadState
         try {
           state = await readSessionState(sessionId)
+          await recordOperatorOpening(sessionId)
         } catch (error: unknown) {
           if (error instanceof SessionNotFound) {
             return err(request, {
@@ -2465,25 +3014,33 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
       },
 
-      updateQueue(request) {
+      async updateQueue(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) {
+          const hidden = await refuseInvisibleSession(request, request.payload.sessionId)
+          if (hidden !== undefined) return hidden
+          return blocked
+        }
         const { sessionId, itemId, action } = request.payload
         if (action.kind === 'edit' && action.content.some(block => block.type !== 'text')) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'attachment-error',
             message: 'queue edits accept text content only',
             details: { reason: 'QUEUE_EDIT_NON_TEXT' },
-          }))
+          })
         }
+        const hidden = await refuseInvisibleSession(request, sessionId)
+        if (hidden !== undefined) return hidden
         const agent = ctx.agents.get(sessionId)
         if (agent !== undefined && hasSubagentOwner(agent.session, agent)) {
-          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+          return err(request, subagentOwnershipError(sessionId))
         }
         if (agent === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'queue-item-not-found',
             message: 'queued item is no longer pending',
             details: { itemId },
-          }))
+          })
         }
         const target = agent.inbox.nextTurn.some(message => message.id === itemId)
           ? 'next-turn'
@@ -2493,18 +3050,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           : (target === 'next-turn' ? agent.inbox.nextTurn : agent.inbox.nextStep)
             .find(candidate => candidate.id === itemId)
         if (target === undefined || message === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'queue-item-not-found',
             message: 'queued item is no longer pending',
             details: { itemId },
-          }))
+          })
         }
         if (action.kind === 'steer' && (target !== 'next-turn' || agent.status !== 'running')) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'steer-unavailable',
             message: 'current turn no longer accepts steering',
             details: { itemId },
-          }))
+          })
         }
         if (action.kind === 'edit') {
           agent.inbox.replace(itemId, freezeMessage({ ...message, content: action.content }))
@@ -2512,31 +3069,37 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           agent.inbox.remove(itemId)
           if (action.kind === 'steer') agent.steer(message)
         }
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
 
-      cancel(request) {
+      async cancel(request) {
         const { sessionId } = request.payload
+        const hidden = await refuseInvisibleSession(request, sessionId)
+        if (hidden !== undefined) return hidden
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) return blocked
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined) {
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'session-not-found',
             message: `session "${sessionId}" not found (not attached)`,
             details: { sessionId },
-          }))
+          })
         }
         if (hasSubagentOwner(agent.session, agent)) {
-          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
+          return err(request, subagentOwnershipError(sessionId))
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
     },
 
     subagents: {
       async list(request, signal) {
         try {
+          await requireVisibleHeader(request.payload.parentSessionId)
           const entries = await ctx.subagents.listChildren(request.payload.parentSessionId, signal)
+          await recordOperatorOpening(request.payload.parentSessionId)
           return ok(request, {
             entries: entries.map(entry => entry.kind === 'child'
               ? {
@@ -2547,6 +3110,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             parentAvailable: ctx.agents.get(request.payload.parentSessionId) !== undefined,
           })
         } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: request.payload.parentSessionId },
+            })
+          }
           if (signal?.aborted || (error instanceof SubagentError && error.code === 'CANCELLED')) {
             return err(request, {
               code: 'cancelled',
@@ -2569,6 +3139,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const {
           parentSessionId, childSessionId, mode, beforeSeq, maxMessages,
         } = request.payload
+        try {
+          await requireVisibleHeader(parentSessionId)
+        } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
+          throw error
+        }
         const verified = await catalogChild(ctx, {
           parentSessionId, childSessionId, mode,
         }, signal)
@@ -2631,11 +3213,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         const page = historyPage(ctx, events, beforeSeq, maxMessages)
+        await recordOperatorOpening(childSessionId)
         return ok(request, { ...page, ...projections === undefined ? {} : { projections } })
       },
 
       async prompt(request, signal) {
+        const blocked = refuseOperatorWrite<SubagentPromptReceipt>(request)
+        if (blocked !== undefined) return blocked
         const { parentSessionId, childSessionId, content, clientTimeZone } = request.payload
+        try {
+          await requireVisibleHeader(parentSessionId)
+        } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
+          throw error
+        }
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
           : canonicalClientTimeZone(clientTimeZone)
@@ -2654,10 +3251,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { parentSessionId },
           })
         }
+        const missing = await refuseMissingCredential<SubagentPromptReceipt>(request)
+        if (missing !== undefined) return missing
         const verified = await catalogChild(ctx, {
           parentSessionId, childSessionId, mode: 'continuable',
         }, signal)
         if (verified.error !== undefined) return err(request, verified.error)
+        const executing = await startExecutingWorld<SubagentPromptReceipt>(request, parent)
+        if ('refused' in executing) return executing.refused
         try {
           const messageId = await ctx.subagents.followup(parent, childSessionId, content, {
             source: {
@@ -2667,8 +3268,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             },
             signal,
           })
+          if (executing.bind !== undefined) {
+            const child = ctx.agents.get(childSessionId)
+            scheduleExecutingCopyBack(child ?? parent, executing.bind)
+          }
           return ok(request, { messageId })
         } catch (error: unknown) {
+          if (executing.bind !== undefined) await abandonExecutingWorld(executing.bind)
           return subagentPromptError(request, error, signal)
         }
       },
@@ -2677,38 +3283,95 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // the core primitive alone authorizes the durable address against the
       // live Activation, which is what keeps a live child interruptible while
       // its parent Agent is offline. Absent targets are accepted no-ops there.
-      interrupt(request) {
+      async interrupt(request) {
+        const blocked = refuseOperatorWrite<{ accepted: true }>(request)
+        if (blocked !== undefined) return blocked
         const { parentSessionId, childSessionId } = request.payload
         try {
+          await requireVisibleHeader(parentSessionId)
           ctx.subagents.interrupt(childSessionId, { kind: 'user', parentSessionId })
         } catch (error: unknown) {
+          if (error instanceof SessionNotFound) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId: parentSessionId },
+            })
+          }
           if (error instanceof SubagentError && error.code === 'UNAUTHORIZED') {
-            return Promise.resolve(err(request, {
+            return err(request, {
               code: 'subagent-unauthorized',
               message: 'subagent does not belong to this parent',
               details: { childSessionId },
-            }))
+            })
           }
-          return Promise.resolve(err(request, {
+          return err(request, {
             code: 'internal',
             message: 'subagent interrupt failed',
             details: {},
-          }))
+          })
         }
-        return Promise.resolve(ok(request, { accepted: true as const }))
+        return ok(request, { accepted: true as const })
       },
     },
 
     workspace: {
-      list(request) {
-        return Promise.resolve(ok(request, {
-          items: ctx.workspaceRegistry.list().map(workspaceView),
-          archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds],
-        }))
+      async list(request) {
+        await recordOperatorOpening()
+        const cloud = ctx.get('cloudWorkspaces')
+        const viewer = viewingAccountId()
+        const items = cloud === undefined
+          ? workspaceRegistry().list()
+          : viewer === undefined ? [] : cloud.listOwned(viewer)
+        return ok(request, {
+          items: items.map(workspaceView),
+          archivedSessionIds: visibleArchivedSessionIds(),
+          emptyCreate: cloud !== undefined,
+        })
       },
 
       async create(request) {
-        const { path } = request.payload
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView>; created: boolean }>(request)
+        if (blocked !== undefined) return blocked
+        const cloud = ctx.get('cloudWorkspaces')
+        const { path, title } = request.payload
+        if (cloud !== undefined) {
+          const account = currentAccountId()
+          if (account === undefined) {
+            return err(request, {
+              code: 'workspace-not-found',
+              message: 'workspace create requires a Sign-in session',
+              details: { workspaceId: '' },
+            })
+          }
+          if (path !== undefined && path !== '') {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: 'cloud Workspaces are created empty; a laptop path cannot be adopted',
+              details: { path },
+            })
+          }
+          try {
+            const workspace = await cloud.createEmpty(account, title)
+            return ok(request, { workspace: workspaceView(workspace), created: true })
+          } catch (error: unknown) {
+            if (error instanceof CloudWorkspaceLimitError) {
+              return err(request, {
+                code: 'workspace-limit',
+                message: error.message,
+                details: { max: MAX_WORKSPACES_PER_ACCOUNT },
+              })
+            }
+            throw error
+          }
+        }
+        if (path === undefined || path === '') {
+          return err(request, {
+            code: 'workspace-invalid-path',
+            message: 'workspace.create requires a path',
+            details: { path: path ?? '' },
+          })
+        }
         try {
           const { workspace, created } = await ensureWorkspace(path)
           return ok(request, { workspace: workspaceView(workspace), created })
@@ -2724,9 +3387,60 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
       },
 
+      async import(request, signal) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView>; created: boolean }>(request)
+        if (blocked !== undefined) return blocked
+        const { gitUrl, title } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        if (cloud === undefined) {
+          return err(request, {
+            code: 'workspace-import-refused',
+            message: 'git Import requires cloud Workspaces',
+            details: { gitUrl: redactGitUrl(gitUrl) },
+          })
+        }
+        const account = currentAccountId()
+        if (account === undefined) {
+          return err(request, {
+            code: 'workspace-not-found',
+            message: 'workspace import requires a Sign-in session',
+            details: { workspaceId: '' },
+          })
+        }
+        try {
+          const workspace = await cloud.importPublicGit(account, gitUrl, title, signal)
+          return ok(request, { workspace: workspaceView(workspace), created: true })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceLimitError) {
+            return err(request, {
+              code: 'workspace-limit',
+              message: error.message,
+              details: { max: MAX_WORKSPACES_PER_ACCOUNT },
+            })
+          }
+          if (error instanceof CloudWorkspaceQuotaError) {
+            return err(request, {
+              code: 'workspace-quota-exceeded',
+              message: error.message,
+              details: { maxBytes: MAX_WORKSPACE_BYTES },
+            })
+          }
+          if (error instanceof CloudWorkspaceImportUrlError || error instanceof CloudWorkspaceImportError) {
+            return err(request, {
+              code: 'workspace-import-refused',
+              message: error.message,
+              details: { gitUrl: error.gitUrl },
+            })
+          }
+          throw error
+        }
+      },
+
       async rename(request) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView> }>(request)
+        if (blocked !== undefined) return blocked
         const { payload } = request
-        const workspace = ctx.workspaceRegistry.get(brandWorkspaceId(payload.workspaceId))
+        const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
         const title = payload.title.trim()
         // Uniqueness AND the same-title no-op both ride the create chain so
@@ -2735,10 +3449,20 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // still lands afterwards.
         const operation = workspaceCreationChain.then(async () => {
           if (title === workspace.title) return
-          if (ctx.workspaceRegistry.list().some(other => other.id !== workspace.id && other.title === title)) {
+          const cloud = ctx.get('cloudWorkspaces')
+          const viewer = viewingAccountId()
+          const siblings = cloud === undefined
+            ? workspaceRegistry().list()
+            : viewer === undefined ? [] : cloud.listOwned(viewer)
+          if (siblings.some(other => other.id !== workspace.id && other.title === title)) {
             throw new WorkspaceNameConflictError(title)
           }
           await workspace.setTitle(title)
+          const cloudRename = ctx.get('cloudWorkspaces')
+          const owner = currentAccountId()
+          if (cloudRename !== undefined && owner !== undefined) {
+            await cloudRename.setOwnedTitle(owner, workspace.id, title)
+          }
         })
         workspaceCreationChain = operation.then(() => undefined, () => undefined)
         try {
@@ -2757,22 +3481,44 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async delete(request) {
+        const blocked = refuseOperatorWrite<{ deleted: true }>(request)
+        if (blocked !== undefined) return blocked
         const { workspaceId } = request.payload
-        const operation = workspaceCreationChain.then(() =>
-          ctx.workspaceRegistry.delete(brandWorkspaceId(workspaceId)))
+        const id = brandWorkspaceId(workspaceId)
+        if (visibleWorkspace(ctx, id) === undefined) return workspaceNotFound(request, workspaceId)
+        const cloud = ctx.get('cloudWorkspaces')
+        const operation = workspaceCreationChain.then(() => {
+          const account = currentAccountId()
+          if (cloud !== undefined && account !== undefined) return cloud.deleteOwned(account, id)
+          return workspaceRegistry().delete(id)
+        })
         workspaceCreationChain = operation.then(() => undefined, () => undefined)
         if (!await operation) return workspaceNotFound(request, workspaceId)
         return ok(request, { deleted: true as const })
       },
 
       async insertBefore(request) {
+        const blocked = refuseOperatorWrite<{ workspaceIds: WorkspaceId[] }>(request)
+        if (blocked !== undefined) return blocked
         const { workspaceId, beforeWorkspaceId } = request.payload
+        if (visibleWorkspace(ctx, brandWorkspaceId(workspaceId)) === undefined) {
+          return workspaceNotFound(request, workspaceId)
+        }
+        if (beforeWorkspaceId !== undefined
+          && visibleWorkspace(ctx, brandWorkspaceId(beforeWorkspaceId)) === undefined) {
+          return workspaceNotFound(request, beforeWorkspaceId)
+        }
         try {
-          const workspaceIds = await ctx.workspaceRegistry.insertBefore(
+          const workspaceIds = await workspaceRegistry().insertBefore(
             brandWorkspaceId(workspaceId),
             beforeWorkspaceId === undefined ? undefined : brandWorkspaceId(beforeWorkspaceId),
           )
-          return ok(request, { workspaceIds: [...workspaceIds] })
+          const cloud = ctx.get('cloudWorkspaces')
+          const viewer = viewingAccountId()
+          const visible = cloud === undefined || viewer === undefined
+            ? workspaceIds
+            : workspaceIds.filter(id => cloud.owns(viewer, id))
+          return ok(request, { workspaceIds: [...visible] })
         } catch (error: unknown) {
           if (!(error instanceof WorkspaceOrderInvalidError)) throw error
           return workspaceNotFound(request, error.workspaceId)
@@ -2780,8 +3526,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async insertSessionBefore(request) {
+        const blocked = refuseOperatorWrite<{ workspace: ReturnType<typeof workspaceView> }>(request)
+        if (blocked !== undefined) return blocked
         const { payload } = request
-        const workspace = ctx.workspaceRegistry.get(brandWorkspaceId(payload.workspaceId))
+        const workspace = visibleWorkspace(ctx, brandWorkspaceId(payload.workspaceId))
         if (workspace === undefined) return workspaceNotFound(request, payload.workspaceId)
         try {
           await workspace.insertSessionBefore(payload.sessionId, payload.beforeSessionId)
@@ -2803,9 +3551,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async archiveSession(request) {
+        const blocked = refuseOperatorWrite<{ archivedSessionIds: SessionId[] }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId } = request.payload
+        if (isolationActive()) {
+          try {
+            await requireVisibleHeader(sessionId)
+          } catch (error: unknown) {
+            if (error instanceof SessionNotFound) {
+              return err(request, {
+                code: 'session-not-found',
+                message: error.message,
+                details: { sessionId },
+              })
+            }
+            throw error
+          }
+        }
         try {
-          await ctx.workspaceRegistry.archiveSession(sessionId)
+          await workspaceRegistry().archiveSession(sessionId)
         } catch (error: unknown) {
           // Only the registry's unknown-session rejection is the business
           // code; storage/durability failures propagate as internal errors.
@@ -2816,7 +3580,81 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId },
           })
         }
-        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+        return ok(request, { archivedSessionIds: visibleArchivedSessionIds() })
+      },
+
+      async write(request) {
+        const blocked = refuseOperatorWrite<{ written: true }>(request)
+        if (blocked !== undefined) return blocked
+        const cloud = ctx.get('cloudWorkspaces')
+        const { workspaceId, path, data } = request.payload
+        if (cloud === undefined) return workspaceNotFound(request, workspaceId)
+        const account = currentAccountId()
+        if (account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          await cloud.writeFile(account, brandWorkspaceId(workspaceId), path, Buffer.from(data, 'utf8'))
+          return ok(request, { written: true as const })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
+          }
+          if (error instanceof CloudWorkspaceQuotaError) {
+            return err(request, {
+              code: 'workspace-quota-exceeded',
+              message: error.message,
+              details: { maxBytes: MAX_WORKSPACE_BYTES },
+            })
+          }
+          if (error instanceof CloudWorkspacePathError) {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: error.message,
+              details: { path },
+            })
+          }
+          throw error
+        }
+      },
+
+      async listFiles(request) {
+        const { workspaceId } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        const account = viewingAccountId()
+        if (cloud === undefined || account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          const paths = await cloud.listFiles(account, brandWorkspaceId(workspaceId))
+          await recordOperatorOpening()
+          return ok(request, { paths })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
+          }
+          throw error
+        }
+      },
+
+      async read(request) {
+        const { workspaceId, path } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        const account = viewingAccountId()
+        if (cloud === undefined || account === undefined) return workspaceNotFound(request, workspaceId)
+        try {
+          const data = await cloud.readFile(account, brandWorkspaceId(workspaceId), path)
+          await recordOperatorOpening()
+          return ok(request, { data: Buffer.from(data).toString('utf8') })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceNotFoundError) {
+            return workspaceNotFound(request, workspaceId)
+          }
+          if (error instanceof CloudWorkspacePathError) {
+            return err(request, {
+              code: 'workspace-invalid-path',
+              message: error.message,
+              details: { path },
+            })
+          }
+          throw error
+        }
       },
     },
 
@@ -2833,14 +3671,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // start from, so a saved default has to be what it reports.
           provider: selection.provider,
           model: selection.model,
-          attachedSessions: ctx.agents.list().length,
+          attachedSessions: isolationActive()
+            ? ctx.agents.list().filter(agent => headerVisible(agent.session.header)).length
+            : ctx.agents.list().length,
           home: homedir(),
           canOpenPath: canOpenPaths(),
         }))
       },
 
       async pickDirectory(request, signal) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<{ path: string | null }>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.pickDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'native') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -2868,7 +3718,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async listDirectory(request, signal) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<DirectoryListing>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.listDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'browse') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -2891,7 +3751,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async createDirectory(request) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<{ path: string }>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.createDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'browse') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -2946,6 +3816,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async clear(request) {
+        const blocked = refuseOperatorWrite<{ cleared: true }>(request)
+        if (blocked !== undefined) return blocked
         const found = await agentFor(request.payload.sessionId)
         if ('error' in found) return err(request, found.error)
         const goals = goalServiceFor(found.agent)
@@ -2985,6 +3857,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // conversation's history was produced under its preset's tools; the
       // agent and the session survive, only the composition is swapped.
       async select(request) {
+        const blocked = refuseOperatorWrite<{ agentPreset: string }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, agentPreset } = request.payload
         const presets = ctx.get('agentPresets')
         if (presets === undefined) {
@@ -3218,6 +4092,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     credentials: {
       async describe(request) {
+        const blocked = refuseOperatorWrite<{ credentials: Record<string, CredentialView> }>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const entries = await Promise.all(request.payload.refs.map(async (ref) => {
@@ -3233,6 +4109,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async set(request) {
+        const blocked = refuseOperatorWrite<Record<string, never>>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const { ref, value } = request.payload
@@ -3249,6 +4127,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async unset(request) {
+        const blocked = refuseOperatorWrite<Record<string, never>>(request)
+        if (blocked !== undefined) return blocked
         const credentials = ctx.get('credentials')
         if (credentials === undefined) return err(request, credentialsAbsent())
         const { ref } = request.payload
@@ -3326,216 +4206,260 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
-        muxQueues.add(queue)
-        for (const session of ctx.sessions.list()) {
-          subscribeSession(queue, session)
-        }
-        for (const pending of pendingQuestions.values()) {
-          queue.push({
-            rpcId: pending.rpcId,
-            payload: {
-              type: 'question/requested', sessionId: pending.sessionId,
-              questions: pending.questions,
-            },
+        const open = (): AsyncIterable<RpcRequest<MuxFrame>> => {
+          const viewer = viewingAccountId()
+          const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+          const subscriber: MuxSubscriber = { queue, viewer }
+          muxSubscribers.add(subscriber)
+          const visibleSessions = () => ctx.sessions.list().filter(session => headerVisibleTo(session.header, viewer))
+          for (const session of visibleSessions()) {
+            subscribeSession(queue, session)
+          }
+          for (const pending of pendingQuestions.values()) {
+            if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
+            queue.push({
+              rpcId: pending.rpcId,
+              payload: {
+                type: 'question/requested', sessionId: pending.sessionId,
+                questions: pending.questions,
+              },
+            })
+          }
+          // Refresh recovery: still-pending approval questions replay with their
+          // stable rpcId so a reconnecting client can still answer them.
+          for (const pending of pendingApprovals.values()) {
+            if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
+            queue.push(requestedFrame(pending))
+          }
+          // Queue snapshot baseline (pendingQuestions precedent): frames replayed
+          // in arrival order per session; a reconnecting client rebuilds its
+          // queue view from these alone.
+          for (const session of visibleSessions()) {
+            const agent = ctx.agents.get(session.id)
+            if (agent?.session === session && agent.inbox.hasPending) {
+              queue.push(frame({ type: 'session/queue', sessionId: session.id, items: queueItems(agent) }))
+            }
+          }
+          // Background-task baseline. `ctx.agents.get` is the non-resuming read:
+          // a session with no live Agent owns no tasks, so it correctly sees only
+          // the unowned ones, and listing never revives a cold session. An empty
+          // set sends nothing — absence is how the client reads "no tasks".
+          const jobs = ctx.get('jobs')
+          if (jobs !== undefined) {
+            for (const session of visibleSessions()) {
+              const views = jobViews(jobs.list(ctx.agents.get(session.id)))
+              if (views.length > 0) {
+                queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
+              }
+            }
+          }
+          // Per-session open-call table for result-view pairing. Bounded by the
+          // per-turn call count: entries clear on turn/end; a table miss (stream
+          // opened mid-turn) backscans the session's in-memory events instead.
+          const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+          const disposers = [
+            ctx.on('session/event', (session: Session, event: SessionEvent) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              if (event.type === 'tool/call') {
+                const data = event.data as ToolCallData
+                try {
+                  let table = openCalls.get(session.id)
+                  if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
+                  table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
+                } catch {
+                // Unparseable model arguments: leave the table unset; the result view soft-falls.
+                }
+              } else if (event.type === 'turn/end') {
+                openCalls.delete(session.id)
+              }
+              const view = viewFor(
+                ctx, event,
+                callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
+                ctx.agents.get(session.id),
+              )
+              queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
+            }),
+            ctx.on('session/created', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              subscribeSession(queue, session)
+              // The subscribe frame clears the client's task mirror, and a
+              // session born after the stream opened missed the baseline loop.
+              // Unowned tasks are visible to it from birth, so without this it
+              // would show none until the next registry change.
+              const views = jobs === undefined ? [] : jobViews(jobs.list(ctx.agents.get(session.id)))
+              if (views.length > 0) {
+                queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
+              }
+            }),
+            ctx.on('session/disposed', (session: Session) => {
+              openCalls.delete(session.id)
+            }),
+            ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
+              if (owner !== undefined) {
+                if (!headerVisibleTo(owner.session.header, viewer)) return
+                // The exact owner instance the fence compares against, so the
+                // push stays correct even while that Agent's scope is tearing
+                // down and a lookup by id would already miss.
+                queue.push(frame({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) }))
+                return
+              }
+              // An unowned task is visible to every caller, so every subscribed
+              // session's set changed with it.
+              for (const session of visibleSessions()) {
+                queue.push(frame({
+                  type: 'session/jobs',
+                  sessionId: session.id,
+                  jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
+                }))
+              }
+            })],
+          ]
+          return queue.iterate(signal, () => {
+            muxSubscribers.delete(subscriber)
+            for (const dispose of disposers) dispose()
           })
         }
-        // Refresh recovery: still-pending approval questions replay with their
-        // stable rpcId so a reconnecting client can still answer them.
-        for (const pending of pendingApprovals.values()) queue.push(requestedFrame(pending))
-        // Queue snapshot baseline (pendingQuestions precedent): frames replayed
-        // in arrival order per session; a reconnecting client rebuilds its
-        // queue view from these alone.
-        for (const session of ctx.sessions.list()) {
-          const agent = ctx.agents.get(session.id)
-          if (agent?.session === session && agent.inbox.hasPending) {
-            queue.push(frame({ type: 'session/queue', sessionId: session.id, items: queueItems(agent) }))
-          }
-        }
-        // Background-task baseline. `ctx.agents.get` is the non-resuming read:
-        // a session with no live Agent owns no tasks, so it correctly sees only
-        // the unowned ones, and listing never revives a cold session. An empty
-        // set sends nothing — absence is how the client reads "no tasks".
-        const jobs = ctx.get('jobs')
-        if (jobs !== undefined) {
-          for (const session of ctx.sessions.list()) {
-            const views = jobViews(jobs.list(ctx.agents.get(session.id)))
-            if (views.length > 0) {
-              queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
-            }
-          }
-        }
-        // Per-session open-call table for result-view pairing. Bounded by the
-        // per-turn call count: entries clear on turn/end; a table miss (stream
-        // opened mid-turn) backscans the session's in-memory events instead.
-        const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
-        const disposers = [
-          ctx.on('session/event', (session: Session, event: SessionEvent) => {
-            if (event.type === 'tool/call') {
-              const data = event.data as ToolCallData
-              try {
-                let table = openCalls.get(session.id)
-                if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
-                table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
-              } catch {
-                // Unparseable model arguments: leave the table unset; the result view soft-falls.
-              }
-            } else if (event.type === 'turn/end') {
-              openCalls.delete(session.id)
-            }
-            const view = viewFor(
-              ctx, event,
-              callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
-              ctx.agents.get(session.id),
-            )
-            queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
-          }),
-          ctx.on('session/created', (session: Session) => {
-            subscribeSession(queue, session)
-            // The subscribe frame clears the client's task mirror, and a
-            // session born after the stream opened missed the baseline loop.
-            // Unowned tasks are visible to it from birth, so without this it
-            // would show none until the next registry change.
-            const views = jobs === undefined ? [] : jobViews(jobs.list(ctx.agents.get(session.id)))
-            if (views.length > 0) {
-              queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
-            }
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            openCalls.delete(session.id)
-          }),
-          ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
-            if (owner !== undefined) {
-              // The exact owner instance the fence compares against, so the
-              // push stays correct even while that Agent's scope is tearing
-              // down and a lookup by id would already miss.
-              queue.push(frame({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) }))
-              return
-            }
-            // An unowned task is visible to every caller, so every subscribed
-            // session's set changed with it.
-            for (const session of ctx.sessions.list()) {
-              queue.push(frame({
-                type: 'session/jobs',
-                sessionId: session.id,
-                jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
-              }))
-            }
-          })],
-        ]
-        return queue.iterate(signal, () => {
-          muxQueues.delete(queue)
-          for (const dispose of disposers) dispose()
-        })
+        if (currentOperatorAccess() === undefined) return open()
+        return (async function* () {
+          await recordOperatorOpening()
+          yield* open()
+        })()
       },
 
       host(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<HostFrame>>()
-        const committedWorkspaces = ctx.workspaceRegistry.list()
-        const committedWorkspaceIds = new Set(
-          committedWorkspaces.map(workspace => String(workspace.id)),
-        )
-        let committedWorkspaceOrder = committedWorkspaces.map(workspace => workspace.id)
-        // Frame-dedup baseline, same posture as committedWorkspaceIds: the
-        // stream opens against the current set; workspace.list re-baselines
-        // reconnecting clients, so only later changes need frames.
-        let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
-        const disposers = [
-          ctx.on('session/created', (session: Session) => {
-            queue.push(frame({
-              type: 'host/session-added',
-              sessionId: session.id,
-              // Derived at frame time like summarize(); a just-created session
-              // has run no turn yet, so this is constantly true in practice.
-              blank: sessionBlank(session),
-              // Including cwd lets the client group the new session without refreshing the list.
-              ...sessionListFields(session.header, session.events),
-            }))
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
-          }),
-          ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
-            queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
-          }),
-          ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
-            queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
-          }),
-          ctx.on('domain/changed', (change) => {
-            if (change.domain !== 'workspace') return
-            if (change.table === '') {
-              if (change.operation !== 'put') return
-              const state = workspaceDomainState.parse(change.value)
-              const orderChanged = state.workspaceIds.length === committedWorkspaceOrder.length
-                && state.workspaceIds.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
-                && state.workspaceIds.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
-              for (const workspaceId of state.workspaceIds) {
-                if (committedWorkspaceIds.has(workspaceId)) continue
-                const workspace = ctx.workspaceRegistry.get(workspaceId)
-                if (workspace === undefined) {
-                  throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
-                }
-                committedWorkspaceIds.add(workspaceId)
-                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
-              }
-              committedWorkspaceOrder = [...state.workspaceIds]
-              if (orderChanged) {
-                queue.push(frame({
-                  type: 'host/workspace-order-changed',
-                  workspaceIds: [...state.workspaceIds],
-                }))
-              }
-              if (state.archivedSessionIds.length !== archivedSessionIds.length
-                || state.archivedSessionIds.some((id, index) => id !== archivedSessionIds[index])) {
-                archivedSessionIds = state.archivedSessionIds
-                queue.push(frame({
-                  type: 'host/archived-sessions-changed',
-                  archivedSessionIds: [...state.archivedSessionIds],
-                }))
-              }
-              return
-            }
-            if (change.table !== 'workspaces') return
-            if (change.operation === 'deleted') {
-              if (!committedWorkspaceIds.delete(change.key)) return
+        const open = (): AsyncIterable<RpcRequest<HostFrame>> => {
+          const viewer = viewingAccountId()
+          const queue = new FrameQueue<RpcRequest<HostFrame>>()
+          const cloud = ctx.get('cloudWorkspaces')
+          const committedWorkspaces = workspaceRegistry().list()
+            .filter(workspace => cloud === undefined || (viewer !== undefined && cloud.owns(viewer, workspace.id)))
+          const committedWorkspaceIds = new Set(
+            committedWorkspaces.map(workspace => String(workspace.id)),
+          )
+          let committedWorkspaceOrder = committedWorkspaces.map(workspace => workspace.id)
+          // Frame-dedup baseline, same posture as committedWorkspaceIds: the
+          // stream opens against the current set; workspace.list re-baselines
+          // reconnecting clients, so only later changes need frames.
+          let archivedSessionIds = visibleArchivedSessionIds(viewer)
+          const disposers = [
+            ctx.on('session/created', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
               queue.push(frame({
-                type: 'host/workspace-removed',
-                workspaceId: change.key as WorkspaceId,
-              }))
-              return
-            }
-            if (!committedWorkspaceIds.has(change.key)) return
-            // Existing-entity table writes are complete attach/touch commits.
-            // A new entity's first put waits for the global registry write above.
-            queue.push(frame({
-              type: 'host/workspace-changed',
-              workspace: changedWorkspaceView(change.key, change.value),
-            }))
-          }),
-          // Allowlisted host events ride one verbatim wrapper frame each. The
-          // allowlist is api-remotes', and `ctx.remote.$on` is the consumer
-          // face; nothing here projects, redacts, or renames.
-          ...API_REMOTE_FORWARDED_EVENTS.map(name => ctx.on(
-            name,
-            // The allowlist's shape assertion proves each name is a real,
-            // non-scoped, void-returning event, so the rest-parameter handler
-            // satisfies every member of the union `on` accepts here;
-            // assertJsonArgs proves the payload is JSON-safe before it queues.
-            ((...args: unknown[]) => {
-              queue.push(frame({
-                type: 'host/remote-event',
-                event: name,
-                args: assertJsonArgs(name, args),
+                type: 'host/session-added',
+                sessionId: session.id,
+                // Derived at frame time like summarize(); a just-created session
+                // has run no turn yet, so this is constantly true in practice.
+                blank: sessionBlank(session),
+                // Including cwd lets the client group the new session without refreshing the list.
+                ...sessionListFields(session.header, session.events),
               }))
             }),
-          )),
-        ]
-        return queue.iterate(signal, () => { for (const dispose of disposers) dispose() })
+            ctx.on('session/disposed', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+            }),
+            ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
+              if (!headerVisibleTo(agent.session.header, viewer)) return
+              queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
+            }),
+            ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
+              if (!headerVisibleTo(agent.session.header, viewer)) return
+              queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
+            }),
+            ctx.on('domain/changed', (change) => {
+              if (change.domain !== 'workspace') return
+              if (change.table === '') {
+                if (change.operation !== 'put') return
+                const state = workspaceDomainState.parse(change.value)
+                for (const workspaceId of state.workspaceIds) {
+                  if (committedWorkspaceIds.has(workspaceId)) continue
+                  const workspace = workspaceRegistry().get(workspaceId)
+                  if (workspace === undefined) {
+                    throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
+                  }
+                  if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, workspace.id))) continue
+                  committedWorkspaceIds.add(workspaceId)
+                  queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
+                }
+                const visibleOrder = cloud === undefined || viewer === undefined
+                  ? [...state.workspaceIds]
+                  : state.workspaceIds.filter(id => cloud.owns(viewer, id))
+                const orderChanged = visibleOrder.length === committedWorkspaceOrder.length
+                && visibleOrder.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
+                && visibleOrder.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
+                committedWorkspaceOrder = visibleOrder
+                if (orderChanged) {
+                  queue.push(frame({
+                    type: 'host/workspace-order-changed',
+                    workspaceIds: [...visibleOrder],
+                  }))
+                }
+                const nextArchived = filterArchivedSessionIds(state.archivedSessionIds, viewer)
+                if (nextArchived.length !== archivedSessionIds.length
+                || nextArchived.some((id, index) => id !== archivedSessionIds[index])) {
+                  archivedSessionIds = nextArchived
+                  queue.push(frame({
+                    type: 'host/archived-sessions-changed',
+                    archivedSessionIds: [...nextArchived],
+                  }))
+                }
+                return
+              }
+              if (change.table !== 'workspaces') return
+              if (change.operation === 'deleted') {
+                if (!committedWorkspaceIds.delete(change.key)) return
+                queue.push(frame({
+                  type: 'host/workspace-removed',
+                  workspaceId: change.key as WorkspaceId,
+                }))
+                return
+              }
+              if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, brandWorkspaceId(change.key)))) {
+                return
+              }
+              if (!committedWorkspaceIds.has(change.key)) return
+              // Existing-entity table writes are complete attach/touch commits.
+              // A new entity's first put waits for the global registry write above.
+              queue.push(frame({
+                type: 'host/workspace-changed',
+                workspace: changedWorkspaceView(change.key, change.value),
+              }))
+            }),
+            // Allowlisted host events ride one verbatim wrapper frame each. The
+            // allowlist is api-remotes', and `ctx.remote.$on` is the consumer
+            // face; nothing here projects, redacts, or renames.
+            ...API_REMOTE_FORWARDED_EVENTS.map(name => ctx.on(
+              name,
+              // The allowlist's shape assertion proves each name is a real,
+              // non-scoped, void-returning event, so the rest-parameter handler
+              // satisfies every member of the union `on` accepts here;
+              // assertJsonArgs proves the payload is JSON-safe before it queues.
+              ((...args: unknown[]) => {
+                queue.push(frame({
+                  type: 'host/remote-event',
+                  event: name,
+                  args: assertJsonArgs(name, args),
+                }))
+              }),
+            )),
+          ]
+          return queue.iterate(signal, () => { for (const dispose of disposers) dispose() })
+        }
+        if (currentOperatorAccess() === undefined) return open()
+        return (async function* () {
+          await recordOperatorOpening()
+          yield* open()
+        })()
       },
     },
 
     downloads: {
       async sessionLog(request, signal) {
+        // A live Session the caller cannot see 404s before flush or `readRaw`.
+        const attached = ctx.sessions.get(request.sessionId)
+        if (attached !== undefined && !headerVisible(attached.header)) {
+          return new Response('session not found', { status: 404 })
+        }
         // Clean error path first: missing services answer 500 and a missing
         // root artifact 404 before any zip byte is produced. The root content
         // read here is reused as the first zip entry, so nothing is read twice.
@@ -3558,6 +4482,21 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           attachments: deps.attachments,
           sessions: deps.sessions,
         }
+        if (attached === undefined && isolationActive()) {
+          try {
+            const meta = (await deps.sessionPersistence.list(signal))
+              .find(header => header.id === request.sessionId)
+            if (meta === undefined || !headerVisible(meta)) {
+              return new Response('session not found', { status: 404 })
+            }
+          } catch {
+            // persistence.list failed; abort wins over this 500. Do not echo
+            // the error: it may carry absolute host paths.
+            signal.throwIfAborted()
+            return new Response('session log export failed to prepare the stored artifact', { status: 500 })
+          }
+        }
+        await recordOperatorOpening(request.sessionId)
         let root: SessionRawArtifact | undefined
         try {
           await flushLiveSessionLog(deps, request.sessionId, signal)
@@ -3592,10 +4531,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     },
 
     respond(message: ClientResponse): Promise<RpcReceipt> {
+      if (currentOperatorAccess() !== undefined) {
+        return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      }
       // Route by the echoed rpcId (the wire correlation): approvals first,
       // then questions — the two registries share one id space of UUIDs.
       const approval = pendingApprovals.get(message.rpcId)
       if (approval !== undefined) {
+        if (!visibleSessionIdTo(approval.sessionId, viewingAccountId())) {
+          return Promise.resolve({ accepted: false, reason: 'not-pending' })
+        }
         if (!message.result.ok) return Promise.resolve({ accepted: false, reason: 'bad-response' })
         const parsed = approvalResponsePayloadSchema.safeParse(message.result.value)
         // The payload's audit correlation must match the entry the rpcId routed
@@ -3607,7 +4552,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return Promise.resolve({ accepted: true })
       }
       const pending = pendingQuestions.get(message.rpcId)
-      if (pending === undefined) return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      if (pending === undefined || !visibleSessionIdTo(pending.sessionId, viewingAccountId())) {
+        return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      }
       if (!message.result.ok) {
         if (message.result.error.code !== 'cancelled') {
           return Promise.resolve({ accepted: false, reason: 'bad-response' })

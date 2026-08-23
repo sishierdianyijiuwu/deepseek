@@ -86,7 +86,8 @@ export function resolveChildAgentOptions(
  * Build the child session's durable creation metadata: the parent's workspace,
  * its direct lineage, coarse product origin, the recursion budget that must
  * survive persistence, the seed boundary that separates inherited parent
- * history from child work, and the composition the child runs under.
+ * history from child work, the composition the child runs under, and the
+ * Account owner when the parent Session records one.
  *
  * The preset is read from the parent's LIVE scope chain rather than from its
  * header, because a parent that switched preset while blank runs on the newer
@@ -116,6 +117,7 @@ export function childSessionMeta(
     // Durable: the recursion budget must survive persistence and resume.
     delegationDepth: childDepth,
     ...lineageSeedLength > 0 ? { seedLength: lineageSeedLength } : {},
+    ...parentHeader.owner === undefined ? {} : { owner: parentHeader.owner },
   }
 }
 

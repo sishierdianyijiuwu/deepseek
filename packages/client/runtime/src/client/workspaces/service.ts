@@ -15,6 +15,11 @@ import { WorkspaceManager, type WorkspaceListPhase } from './manager.ts'
 export interface WorkspaceListState {
   items: readonly WorkspaceView[]
   /**
+   * True when the Host creates empty cloud Workspaces instead of adopting a
+   * laptop directory. Absent or false keeps the directory-picker add flow.
+   */
+  emptyCreate?: boolean
+  /**
    * Registry-global archive set in Host order: grouping surfaces hide these
    * sessions everywhere (workspace groups and the ungrouped bucket) while
    * their session logs and workspace accounting slots remain. A plain array
@@ -196,7 +201,7 @@ export class WorkspaceRuntime implements IWorkspaces {
    * @param input - the Host create payload.
    * @returns the created or idempotently resolved Workspace.
    */
-  async create(input: { path: string }): Promise<WorkspaceView> {
+  async create(input: { path?: string; title?: string }): Promise<WorkspaceView> {
     const result = await this.manager.create(input)
     if (!result.ok) throw new WorkspaceCreateError(result.error)
     return result.value.workspace
@@ -345,6 +350,7 @@ export class WorkspaceRuntime implements IWorkspaces {
     this.list.set({
       items: workspace.items,
       archivedSessionIds: workspace.archivedSessionIds,
+      ...workspace.emptyCreate === true ? { emptyCreate: true } : {},
       state: workspace.state,
       phase: workspace.phase,
       error: workspace.error,

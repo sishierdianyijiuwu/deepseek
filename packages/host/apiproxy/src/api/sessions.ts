@@ -249,7 +249,10 @@ export interface SessionsApi {
 
   /**
    * Creates a real session and its idle agent. At most one of `workspaceId` /
-   * `cwd` is accepted; an omitted project uses the Host cwd. A caller may
+   * `cwd` is accepted; an omitted project uses the Host cwd. When cloud
+   * Workspaces are composed, `workspaceId` is required and must be owned by
+   * the signed-in Account (`workspace-required` / `workspace-not-found`).
+   * A caller may
    * preallocate `sessionId`: retries with the same id and cwd return the same
    * session, while a different cwd fails with `session-conflict`. Workspace
    * creation attaches the session after publication; an attach failure
@@ -346,7 +349,12 @@ export interface SessionsApi {
    * Browser callers attach their current IANA zone;
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains
    * valid for non-browser callers. Session-backed subagents reject with `agent-busy` and use
-   * `subagent.prompt`.
+   * `subagent.prompt`. When Accounts are composed, an Account with no stored
+   * model Credential is refused with `credential-missing`. A second Executing
+   * Session is refused with `executing-session-busy` until the first stops;
+   * extra tabs may still read and prompt the same Executing Session. Exhausted
+   * daily execution-world time is refused with `e2b-cap-exhausted`; history
+   * reads and Credential changes still work.
    */
   prompt(request: RpcRequest<{
     sessionId: SessionId

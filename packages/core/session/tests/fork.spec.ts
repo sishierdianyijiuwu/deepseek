@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, CallId , createMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionForkError, SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionOwnerId, TurnEndReason } from '@deepseek-ai/dsh-session'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -74,6 +74,17 @@ describe('SessionStore.fork', () => {
       parentSession: SessionId('empty-parent'),
       seedLength: 0,
     })
+  })
+
+  it('inherits Account owner onto the child header', async () => {
+    const { ctx, sessions } = await setup()
+    const source = ctx.sessions.create(SessionId('owned-parent'), {
+      meta: { cwd: '/workspace', owner: 'account-1' as SessionOwnerId },
+    })
+
+    const child = sessions.fork(source, undefined, SessionId('owned-child'))
+
+    expect(child.header.owner).toBe('account-1')
   })
 
   it('forks the latest completed boundary by default into detached frozen seed events', async () => {

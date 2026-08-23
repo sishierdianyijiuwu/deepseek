@@ -2,7 +2,7 @@
 
 English | [中文](credentials.zh.md)
 
-The credential seam of [dsh-credentials](../../packages/credentials/credentials) keeps secrets out of configuration: settings sections and `cordis.yml` entries carry *references* (environment-variable names), providers such as [dsh-credentials-local](../../packages/credentials/credentials-local) own the values, and consumers resolve a reference once per operation — the LLM adapters resolve once per model request, so a rotated credential reaches the very next request without any restart. One seam-wide rule binds every provider: an empty stored value is absent everywhere.
+The credential seam of [dsh-credentials](../../packages/credentials/credentials) keeps secrets out of configuration: settings sections and `cordis.yml` entries carry *references* (environment-variable names), providers such as [dsh-credentials-local](../../packages/credentials/credentials-local) (local) and [dsh-credentials-account](../../packages/credentials/credentials-account) (hosted, one document per signed-in Account, no process-environment layer) own the values, and consumers resolve a reference once per operation — the LLM adapters resolve once per model request, so a rotated credential reaches the very next request without any restart. One seam-wide rule binds every provider: an empty stored value is absent everywhere. Hosted `session.prompt` and `subagent.prompt` refuse when `hasStoredSecret()` is false so an Account with no Credential can still sign in.
 
 Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)
 
@@ -191,6 +191,17 @@ abstract describeRecord(key: CredentialKey): Promise<CredentialRecordInfo>
 abstract listRecords(): Promise<readonly CredentialRecordEntry[]>
 
 /**
+ * Whether any secret is stored for this operation's caller. Hosted
+ * `session.prompt` and `subagent.prompt` refuse when this is false so an
+ * Account with no Credential can still sign in. The default answers from
+ * {@link listRecords} only; providers that store references implement the
+ * reference half too.
+ * @returns true when a later {@link resolve} or {@link readRecord} would
+ *   observe a stored secret.
+ */
+hasStoredSecret(): Promise<boolean>
+
+/**
  * Serialized read-modify-write over one record — the only write path.
  * `mutate` sees the record as it stands at the moment the write is
  * exclusive, and returning `undefined` leaves the entry untouched. Exclusion
@@ -208,6 +219,14 @@ abstract modifyRecord( key: CredentialKey, mutate: (current: CredentialRecord | 
  * @param key - the record to remove.
  */
 abstract deleteRecord(key: CredentialKey): Promise<void>
+
+/**
+ * Erase every stored secret for one Account. Hosted Account-scoped providers
+ * delete that Account's document; process-env and file providers no-op.
+ * Unknown ids are a no-op. Does not require a bound Sign-in Account.
+ * @param _accountId - Account whose stored secrets should disappear.
+ */
+eraseOwned(_accountId: string): Promise<void>
 ```
 
 Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)

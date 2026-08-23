@@ -1,6 +1,18 @@
 /** Host HTTP bridge for browser-client RPC. */
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import {
+  SIGN_IN_COOKIE,
+  OPERATOR_ACCESS_HEADER,
+  cookieValue,
+  runWithAccount,
+  runWithOperatorAccess,
+  signInSessionId,
+  type AccountId,
+  type OperatorAccess,
+} from '@deepseek-ai/dsh-account'
 import type {} from '@deepseek-ai/dsh-attachment'
 // Activates the webServer Context merge used below.
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -9,7 +21,7 @@ import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
-import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
+import { rejectUnauthorizedUpgrade, rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
 export type {
   ConnectionRpcAuthority,
@@ -68,25 +80,26 @@ export const Config: z<ConnectionConfig> = z.object({
 
 /**
  * Methods gated to loopback even on a trusted-host deployment. Native dialogs
- * act on the host machine; the settings and credential domains mutate the
- * user's configuration and secret store, and READING them is equally
- * privileged — `settings.describe` returns every exposed namespace's
- * configuration and `credentials.describe` reports whether an arbitrary
- * environment-variable name is configured and where from, which is
- * reconnaissance no anonymous caller should have. `trustedHosts` is a
- * DNS-rebinding fence, explicitly not authentication, so the whole
- * configuration plane stays loopback-same-origin until a real authentication
- * layer exists. `llm.discoverModels` belongs to that plane on both counts: it
- * carries a draft credential, and it makes the HOST issue a GET to a URL the
- * caller chose and reports back the status or the parsed body — an anonymous
- * LAN caller would have a probe for whatever the host can reach and the
- * browser cannot.
+ * act on the host machine; the settings domain mutates the user's
+ * configuration, and READING it is equally privileged — `settings.describe`
+ * returns every exposed namespace's configuration. `trustedHosts` is a
+ * DNS-rebinding fence, explicitly not Account authentication, so settings and
+ * native dialogs stay loopback-same-origin. `llm.discoverModels` belongs to
+ * that plane on both counts: it carries a draft credential, and it makes the
+ * HOST issue a GET to a URL the caller chose and reports back the status or
+ * the parsed body — an anonymous LAN caller would have a probe for whatever
+ * the host can reach and the browser cannot.
+ *
+ * `credentials.*` join this set only when Accounts are not composed: local
+ * `dsh web` still pins Credential writes to loopback. A hosted composition
+ * authorizes those methods with the Sign-in session instead (`/api` already
+ * requires it), so another Account's secret is never the loopback caller's.
  *
  * The model catalog (`llm.providers`, `llm.models`) is deliberately NOT here:
  * it carries provider ids, display names, and model lists — no endpoints,
  * keys, or key state — and a LAN client's model picker legitimately needs it.
  */
-const PRIVILEGED_METHODS = new Set([
+const LOOPBACK_PRIVILEGED_METHODS = new Set([
   // A preset composition names the plugins a session runs, so reading one is
   // reconnaissance; copy and remove rearrange what the deployment offers, and
   // openDocument drives the host desktop — all more than the roster beside
@@ -112,18 +125,33 @@ const PRIVILEGED_METHODS = new Set([
   'settings.update',
   'settings.replace',
   'settings.mutate',
+  'llm.discoverModels',
+])
+
+const CREDENTIAL_METHODS = new Set([
   'credentials.describe',
   'credentials.set',
   'credentials.unset',
-  'llm.discoverModels',
 ])
+
+/**
+ * Whether one `/api` method stays loopback-only for this composition.
+ * @param ctx - Host context that may carry `accounts`.
+ * @param method - RPC method name from the `/api/` path.
+ * @returns true when the inner fence must pin the call to loopback.
+ */
+function isLoopbackPinned(ctx: Context, method: string): boolean {
+  if (LOOPBACK_PRIVILEGED_METHODS.has(method)) return true
+  return CREDENTIAL_METHODS.has(method) && ctx.get('accounts') === undefined
+}
 
 /**
  * Mounts the API gateway under the browser transport prefix. Every request on
  * the prefix passes the browser-trust fence first (DNS-rebinding and
  * cross-site defense — [api-request-trust](./api-request-trust.ts));
  * privileged methods additionally pass it with an empty trust list, which
- * pins them to loopback.
+ * pins them to loopback. Credential methods skip that pin when Accounts are
+ * composed: the Sign-in session is the authorization.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
@@ -143,7 +171,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         ? pathname.slice(API_PATH.length + 1)
         : undefined
       if (method !== undefined
-        && PRIVILEGED_METHODS.has(method)
+        && isLoopbackPinned(ctx, method)
         && !isTrustedApiRequest(request, [])) {
         return new Response('forbidden', { status: 403 })
       }
@@ -167,7 +195,18 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         res.end('forbidden')
         return
       }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      const identity = await resolveApiIdentity(ctx, req)
+      if (identity === 'required') {
+        res.writeHead(401)
+        res.end('unauthorized')
+        return
+      }
+      if (identity === 'forbidden') {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
+      await runApiIdentity(identity, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
@@ -181,11 +220,8 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       apiCtx.effect(() => apiCtx.webServer.registerUpgrade({
         path,
         handler: (req, socket, head) => {
-          if (!isTrustedApiRequest(req, trustedHosts)) {
-            rejectWebSocketUpgrade(socket)
-            return
-          }
-          return handle(req, socket, head)
+          void authorizeApiUpgrade(apiCtx, req, socket, head, trustedHosts, handle)
+            .catch(() => { rejectUnauthorizedUpgrade(socket) })
         },
       }), `client-connection: ${path} WebSocket`)
     }
@@ -193,4 +229,84 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
     registerDownlink(MUX_EVENTS_PATH, (req, socket, head) => { downlinks.handleMux(req, socket, head) })
     registerDownlink(HOST_EVENTS_PATH, (req, socket, head) => { downlinks.handleHost(req, socket, head) })
   })
+}
+
+type ApiIdentity = AccountId | OperatorAccess | undefined
+
+/**
+ * Resolve the signed-in Account, and optional Operator access, for one `/api`
+ * request when Accounts are composed.
+ * @param ctx - Host context that may carry `accounts`.
+ * @param req - incoming HTTP or upgrade request.
+ * @returns the identity, `undefined` when Accounts are not composed,
+ *   `'required'` when the cookie is missing or dead, or `'forbidden'` when a
+ *   non-Operator presents {@link OPERATOR_ACCESS_HEADER}.
+ */
+async function resolveApiIdentity(
+  ctx: { get: Context['get'] },
+  req: IncomingMessage,
+): Promise<ApiIdentity | 'required' | 'forbidden'> {
+  const accounts = ctx.get('accounts')
+  if (accounts === undefined) return undefined
+  const id = cookieValue(req.headers.cookie, SIGN_IN_COOKIE)
+  if (id === undefined) return 'required'
+  const session = await accounts.lookupSignIn(signInSessionId(id))
+  if (session === undefined) return 'required'
+  const raw = req.headers[OPERATOR_ACCESS_HEADER]
+  const targetEmail = Array.isArray(raw) ? raw[0] : raw
+  if (targetEmail === undefined || targetEmail === '') return session.accountId
+  if (!session.operator) return 'forbidden'
+  const target = await accounts.lookupByEmail(targetEmail)
+  if (target === undefined || target.accountId === session.accountId) return session.accountId
+  return {
+    operatorAccountId: session.accountId,
+    operatorEmail: session.email,
+    targetAccountId: target.accountId,
+  }
+}
+
+function runApiIdentity<T>(identity: ApiIdentity, fn: () => T): T {
+  if (identity === undefined) return fn()
+  if (typeof identity === 'string') return runWithAccount(identity, fn)
+  return runWithOperatorAccess(identity, fn)
+}
+
+/**
+ * Trust-fence then Sign-in check for one `/api` WebSocket upgrade.
+ * @param ctx - Host context that may carry `accounts`.
+ * @param req - upgrade request.
+ * @param socket - raw socket transferred by the HTTP server.
+ * @param head - bytes already read after the upgrade headers.
+ * @param trustedHosts - deployment authorities accepted by the Host fence.
+ * @param handle - mux or host downlink after authorization.
+ */
+async function authorizeApiUpgrade(
+  ctx: { get: Context['get'] },
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  trustedHosts: readonly string[],
+  handle: WebUpgradeRoute['handler'],
+): Promise<void> {
+  if (!isTrustedApiRequest(req, trustedHosts)) {
+    rejectWebSocketUpgrade(socket)
+    return
+  }
+  let identity: ApiIdentity | 'required' | 'forbidden'
+  try {
+    identity = await resolveApiIdentity(ctx, req)
+  } catch {
+    // lookupSignIn I/O failed: close the duplex rather than leave it hanging.
+    rejectUnauthorizedUpgrade(socket)
+    return
+  }
+  if (identity === 'required') {
+    rejectUnauthorizedUpgrade(socket)
+    return
+  }
+  if (identity === 'forbidden') {
+    rejectWebSocketUpgrade(socket)
+    return
+  }
+  await runApiIdentity(identity, () => handle(req, socket, head))
 }

@@ -8,6 +8,9 @@ import { randomUUID } from 'node:crypto'
 import { posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { AccountId } from '@deepseek-ai/dsh-account'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-agent'
 import { FileType, Sandbox, SandboxNotFoundError } from 'e2b'
 
 export {
@@ -47,17 +50,59 @@ export interface Config {
   cwd?: string
   /** E2B sandbox lifetime in milliseconds; expiry always deletes the sandbox. */
   timeoutMs?: number
+  /**
+   * When true, sandboxes are created per Executing Session (one per Account)
+   * rather than one eager process-wide sandbox. Hosted control plane sets this.
+   */
+  perExecutingSession?: boolean
+  /**
+   * Minutes of sandbox-running time each Account may use per UTC day.
+   * Host `session.prompt` / `subagent.prompt` enforce this when `ctx.accounts`
+   * is composed.
+   */
+  dailyCapMinutes?: number
 }
 
 interface ResolvedConfig {
   apiKey: string
   cwd: string
   timeoutMs: number
+  perExecutingSession: boolean
+  dailyCapMinutes: number
 }
 
 interface SchemaResolvedConfig extends Config {
   cwd: string
   timeoutMs: number
+  perExecutingSession: boolean
+  dailyCapMinutes: number
+}
+
+/** Another Executing Session already holds this Account's sandbox. */
+export class ExecutingSessionBusyError extends Error {
+  /**
+   * @param sessionId - the Session that currently holds the lock.
+   */
+  constructor(readonly sessionId: SessionId) {
+    super(`this Account already has Executing Session '${sessionId}'`)
+    this.name = 'ExecutingSessionBusyError'
+  }
+}
+
+/** Result of {@link E2BRuntime.startExecutingSession}. */
+export interface ExecutingSessionStart {
+  /** Live SDK handle after cwd setup. */
+  readonly sandbox: Sandbox
+  /** True when this call returned an already-live sandbox for the same Session. */
+  readonly reused: boolean
+}
+
+interface ExecutingSlot {
+  sessionId: SessionId
+  sandbox: Promise<Sandbox>
+  handle?: Sandbox
+  state: 'live' | 'stopping'
+  stop: Promise<void>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -68,23 +113,33 @@ declare module '@deepseek-ai/cordis' {
 
 /**
  * Creates one lazily consumable E2B SDK handle and deletes the sandbox at
- * timeout or disposal. Creation begins at plugin construction; adapters await
- * {@link getSandbox} before their first operation.
+ * timeout or disposal. Creation begins at plugin construction unless
+ * `perExecutingSession` is set, in which case {@link startExecutingSession}
+ * creates one sandbox per Account. Adapters await {@link getSandbox} before
+ * their first operation. The platform API key is never installed in a sandbox.
  */
 export class E2BRuntime extends Service {
   static Config: z<Config> = z.object({
     apiKey: z.string(),
     cwd: z.string().default('/home/user/workspace'),
     timeoutMs: z.number().default(300_000),
+    perExecutingSession: z.boolean().default(false),
+    dailyCapMinutes: z.number().default(60),
   })
 
   /** Validated remote working directory shared by provider adapters. */
   readonly cwd: string
   /** Remote directory reserved for adapter-owned process and terminal state. */
   readonly runtimeRoot: string
+  /** Whether sandboxes are created per Executing Session instead of process-wide. */
+  readonly perExecutingSession: boolean
+  /** Minutes of sandbox-running time each Account may use per UTC day. */
+  readonly dailyCapMinutes: number
 
   private readonly config: ResolvedConfig
-  private readonly ready: Promise<Sandbox>
+  private readonly ready: Promise<Sandbox> | undefined
+  private readonly slots = new Map<AccountId, ExecutingSlot>()
+  private readonly accountChains = new Map<AccountId, Promise<unknown>>()
   private disposed = false
 
   constructor(ctx: Context, config: Config) {
@@ -96,20 +151,32 @@ export class E2BRuntime extends Service {
       apiKey: apiKey ?? '',
       cwd: resolved.cwd,
       timeoutMs: resolved.timeoutMs,
+      perExecutingSession: resolved.perExecutingSession === true,
+      dailyCapMinutes: resolved.dailyCapMinutes,
     }
     this.validate()
     this.cwd = this.config.cwd
     this.runtimeRoot = posix.join(this.cwd, '.dsh-e2b')
-    this.ready = this.open()
-    // A deployment may load the owner before any adapter uses it. Keep a
-    // failed eager connection observed; getSandbox() still returns the error.
-    void this.ready.catch(() => {})
+    this.perExecutingSession = this.config.perExecutingSession
+    this.dailyCapMinutes = this.config.dailyCapMinutes
+    if (!this.perExecutingSession) {
+      this.ready = this.open()
+      // A deployment may load the owner before any adapter uses it. Keep a
+      // failed eager connection observed; getSandbox() still returns the error.
+      void this.ready.catch(() => {})
+    }
 
     ctx.effect(() => async () => {
       this.disposed = true
+      if (this.perExecutingSession) {
+        await Promise.all([...this.slots.keys()].map(accountId => this.killSlot(accountId)))
+        return
+      }
+      const ready = this.ready
+      if (ready === undefined) return
       let sandbox: Sandbox
       try {
-        sandbox = await this.ready
+        sandbox = await ready
       } catch (_sandboxSetupFailure) {
         // open() either acquired no sandbox or already made the POC's one rollback attempt.
         return
@@ -123,17 +190,181 @@ export class E2BRuntime extends Service {
   }
 
   /**
-   * Return the shared live SDK handle.
+   * Return the live SDK handle for this caller.
+   * Process-wide mode returns the construction-time sandbox. Per-Executing-Session
+   * mode returns the Account's sandbox from the initiating Agent.
    * @returns the created sandbox after the configured cwd exists.
-   * @throws when E2B rejects creation or the service is disposing.
+   * @throws when E2B rejects creation, the service is disposing, or no Executing Session is active.
    */
   async getSandbox(): Promise<Sandbox> {
     if (this.disposed) throw new Error('E2B sandbox service is disposing')
-    const sandbox = await this.ready
-    // Disposal can race the awaited sandbox readiness despite the synchronous precheck.
-    // oxlint-disable-next-line typescript/no-unnecessary-condition -- Awaiting readiness yields to disposal.
+    if (this.perExecutingSession) return this.sandboxForInitiator()
+    const ready = this.ready
+    if (ready === undefined) throw new Error('E2B sandbox service is disposing')
+    const sandbox = await ready
     if (this.disposed) throw new Error('E2B sandbox service is disposing')
     return sandbox
+  }
+
+  /**
+   * Create or reuse this Account's Executing Session sandbox.
+   * @param accountId - owning Account.
+   * @param sessionId - Session that holds the one-executing-session lock.
+   * @param opts.onCreated - runs on the Account chain after a new sandbox is live.
+   * @returns the live sandbox and whether this call reused an existing slot.
+   * @throws {@link ExecutingSessionBusyError} when another Session holds the lock.
+   */
+  async startExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ): Promise<ExecutingSessionStart> {
+    if (!this.perExecutingSession) {
+      return { sandbox: await this.getSandbox(), reused: true }
+    }
+    return this.enqueueAccount(accountId, () => this.startExecutingSessionLocked(accountId, sessionId, opts))
+  }
+
+  /**
+   * Copy-back callers then kill this Account's sandbox. The durable Workspace
+   * is not deleted. Missing or already-expired sandboxes are quiescence.
+   * @param accountId - owning Account.
+   * @param sessionId - Session that holds the lock; a mismatch is ignored.
+   * @param opts.skipIf - when true at enqueue time inside the Account chain, leave the sandbox live.
+   * @param opts.onStopped - runs on the Account chain after this Session's slot is killed.
+   */
+  async stopExecutingSession(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { skipIf?: () => boolean; onStopped?: () => Promise<void> },
+  ): Promise<void> {
+    return this.enqueueAccount(accountId, async () => {
+      const slot = this.slots.get(accountId)
+      if (slot === undefined || slot.sessionId !== sessionId) return
+      if (opts?.skipIf?.() === true) return
+      await this.killSlot(accountId)
+      await opts?.onStopped?.()
+    })
+  }
+
+  /**
+   * The Session that currently holds this Account's Executing Session lock.
+   * @param accountId - owning Account.
+   * @returns the locked Session id, or `undefined`.
+   */
+  executingSessionId(accountId: AccountId): SessionId | undefined {
+    const slot = this.slots.get(accountId)
+    return slot?.state === 'live' ? slot.sessionId : undefined
+  }
+
+  /**
+   * Resolved live sandbox for this Account, if setup finished.
+   * Host copy-back waiters compare this object with the handle they bound.
+   * @param accountId - owning Account.
+   * @returns the live sandbox, or `undefined`.
+   */
+  executingSandbox(accountId: AccountId): Sandbox | undefined {
+    const slot = this.slots.get(accountId)
+    return slot?.state === 'live' ? slot.handle : undefined
+  }
+
+  private enqueueAccount<T>(accountId: AccountId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.accountChains.get(accountId) ?? Promise.resolve()
+    const run = previous.then(operation, operation)
+    this.accountChains.set(accountId, run.then(() => undefined, () => undefined))
+    return run
+  }
+
+  private async startExecutingSessionLocked(
+    accountId: AccountId,
+    sessionId: SessionId,
+    opts?: { onCreated?: () => Promise<void> },
+  ): Promise<ExecutingSessionStart> {
+    if (this.disposed) throw new Error('E2B sandbox service is disposing')
+    const existing = this.slots.get(accountId)
+    if (existing !== undefined && existing.state === 'live') {
+      if (existing.sessionId !== sessionId) throw new ExecutingSessionBusyError(existing.sessionId)
+      const sandbox = await existing.sandbox
+      if (this.disposed) throw new Error('E2B sandbox service is disposing')
+      return { sandbox, reused: true }
+    }
+    const sandbox = this.open()
+    const slot: ExecutingSlot = {
+      sessionId,
+      sandbox,
+      state: 'live',
+      stop: Promise.resolve(),
+    }
+    this.slots.set(accountId, slot)
+    try {
+      const created = await sandbox
+      if (this.disposed) {
+        await this.killSandbox(created)
+        throw new Error('E2B sandbox service is disposing')
+      }
+      if (this.slots.get(accountId) === slot) slot.handle = created
+      try {
+        await opts?.onCreated?.()
+      } catch (error: unknown) {
+        if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
+        await this.killSandbox(created)
+        throw error
+      }
+      return { sandbox: created, reused: false }
+    } catch (error: unknown) {
+      if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
+      throw error
+    }
+  }
+
+  private async sandboxForInitiator(): Promise<Sandbox> {
+    const agent = this.ctx.get('agents')?.currentInitiator()
+    const owner = agent?.session.header.owner
+    if (owner === undefined) {
+      throw new Error('dsh-e2b: no Executing Session sandbox for this initiator')
+    }
+    const slot = this.slots.get(owner as AccountId)
+    if (slot === undefined || slot.state !== 'live') {
+      throw new Error('dsh-e2b: no Executing Session sandbox for this Account')
+    }
+    const sandbox = await slot.sandbox
+    if (this.disposed) throw new Error('E2B sandbox service is disposing')
+    return sandbox
+  }
+
+  private async killSlot(accountId: AccountId): Promise<void> {
+    const slot = this.slots.get(accountId)
+    if (slot === undefined) return
+    if (slot.state === 'stopping') {
+      await slot.stop
+      return
+    }
+    slot.state = 'stopping'
+    const stop = this.killSandboxPromise(slot.sandbox)
+    slot.stop = stop
+    try {
+      await stop
+    } finally {
+      if (this.slots.get(accountId) === slot) this.slots.delete(accountId)
+    }
+  }
+
+  private async killSandboxPromise(ready: Promise<Sandbox>): Promise<void> {
+    let sandbox: Sandbox
+    try {
+      sandbox = await ready
+    } catch (_sandboxSetupFailure) {
+      return
+    }
+    await this.killSandbox(sandbox)
+  }
+
+  private async killSandbox(sandbox: Sandbox): Promise<void> {
+    try {
+      await sandbox.kill()
+    } catch (error: unknown) {
+      if (!(error instanceof SandboxNotFoundError)) throw error
+    }
   }
 
   private validate(): void {
@@ -145,6 +376,9 @@ export class E2BRuntime extends Service {
     }
     if (!Number.isFinite(this.config.timeoutMs) || this.config.timeoutMs <= 0) {
       throw new Error('dsh-e2b: timeoutMs must be a positive finite number')
+    }
+    if (!Number.isFinite(this.config.dailyCapMinutes) || this.config.dailyCapMinutes < 1) {
+      throw new Error('dsh-e2b: dailyCapMinutes must be a positive finite number')
     }
   }
 

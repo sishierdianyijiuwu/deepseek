@@ -170,6 +170,12 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
           result: { ok: true, value: { workspace: { workspaceId: 'w1' as never, path: '/w', title: 'w', sessionIds: [], createdAt: 't', updatedAt: 't' }, created: true } },
         }
       },
+      async import(request) {
+        return {
+          rpcId: request.rpcId,
+          result: { ok: true, value: { workspace: { workspaceId: 'w1' as never, path: '/w', title: 'w', sessionIds: [], createdAt: 't', updatedAt: 't' }, created: true } },
+        }
+      },
       async rename(request) {
         return {
           rpcId: request.rpcId,
@@ -190,6 +196,15 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       },
       async archiveSession(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { archivedSessionIds: [request.payload.sessionId] } } }
+      },
+      async write(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { written: true as const } } }
+      },
+      async listFiles(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { paths: [] } } }
+      },
+      async read(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { data: '' } } }
       },
     },
     agentPresets: {

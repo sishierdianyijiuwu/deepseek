@@ -41,6 +41,10 @@ export interface RpcErrorDetailsMap {
   'workspace-invalid-path': { path: string }
   'workspace-name-conflict': { name: string }
   'workspace-move-invalid': { workspaceId: string; sessionId: SessionId; beforeSessionId?: SessionId }
+  'workspace-required': {}
+  'workspace-limit': { max: number }
+  'workspace-quota-exceeded': { maxBytes: number }
+  'workspace-import-refused': { gitUrl: string }
   'directory-unreadable': { path: string }
   'directory-exists': { path: string }
   'directory-create-failed': { path: string }
@@ -71,6 +75,14 @@ export interface RpcErrorDetailsMap {
   'settings-conflict': { ns: string; expected: number; actual: number }
   /** A credential write was refused (read-only shadowing layer or storage failure); the message is the seam's own text. */
   'credential-rejected': { ref: string }
+  /** Hosted `session.prompt` when the signed-in Account has no stored model Credential. */
+  'credential-missing': {}
+  /** Hosted `session.prompt` when another Executing Session already holds this Account's sandbox. */
+  'executing-session-busy': { sessionId: SessionId }
+  /** Hosted `session.prompt` when this Account has used its daily execution-world minutes. */
+  'e2b-cap-exhausted': { capMinutes: number; resetsAt: number }
+  /** Hosted Operator access refused a prompt, mutation, respond, or Credential secret read. */
+  'operator-access-readonly': {}
   /**
    * Interrogating a draft provider endpoint did not produce a model listing:
    * no adapter family serves the namespace, the protocol has no listing this

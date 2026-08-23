@@ -1,0 +1,68 @@
+{
+  "name": "@deepseek-ai/dsh-hosted",
+  "description": "Hosted-profile bundle: Account, mailer, auth HTTP, Account-scoped Credentials, cloud Workspaces, E2B execution world, and register/sign-in/reset/Deletion UI over dsh-web-app",
+  "version": "0.1.1-rc.2",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
+    "directory": "packages/bundle/hosted"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "cordis.patch.yml",
+    "reverse-proxy/Caddyfile",
+    "reverse-proxy/compose.yml",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-account-http": "workspace:^",
+    "@deepseek-ai/dsh-account-postgres": "workspace:^",
+    "@deepseek-ai/dsh-bash-local": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-account": "workspace:^",
+    "@deepseek-ai/dsh-credentials-account": "workspace:^",
+    "@deepseek-ai/dsh-e2b": "workspace:^",
+    "@deepseek-ai/dsh-fs-e2b": "workspace:^",
+    "@deepseek-ai/dsh-mailer-smtp": "workspace:^",
+    "@deepseek-ai/dsh-sandbox-policy": "workspace:^",
+    "@deepseek-ai/dsh-subprocess-e2b": "workspace:^",
+    "@deepseek-ai/dsh-workspace-cloud": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/cordis": "workspace:^"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis-plugin-include": "workspace:^",
+    "@deepseek-ai/cordis-plugin-loader": "workspace:^",
+    "@deepseek-ai/dsh-invariants": "workspace:^",
+    "@deepseek-ai/cordis": "workspace:^",
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.2.0"
+  }
+}

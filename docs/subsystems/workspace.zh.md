@@ -2,7 +2,7 @@
 
 [English](workspace.md) | 中文
 
-工作区（workspace）是用户工作目录的持久记录：一个建立在规范路径之上的稳定 id、一个显示标题，以及归属于它的会话的有序账本。该子系统是单个包（package）（[dsh-workspace](../../packages/workspace/workspace)，`ctx.workspaceRegistry`）——一项宿主侧可选能力，不属于 agent loop（智能体循环）主干，并且对模型不可见（没有工具、没有提示词文本、没有会话事件）。它通过[存储领域数据形式](storage.zh.md)存储自己的记录，并对照 [`SessionHeader.cwd`](persistence.zh.md#sessionheader--metadata-beside-the-log) 校验会话成员资格，因此 `storageDomain` 与 `sessionPersistence` 是必需的启动依赖：持久化这一依赖不可用时，插件保持 pending，而不是把这种不可用误当作空历史。设计记录：[领域 KV 存储 Agent Note（agent 决策记录）](../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.zh.md)；引导与 GUI 顺序：[Workspace UI 产品流程 Agent Note](../../.agents/notes/implemented/feature/2026-07-25-workspace-ui-product-flow.zh.md)。
+工作区（workspace）是用户工作目录的持久记录：一个建立在规范路径之上的稳定 id、一个显示标题，以及归属于它的会话的有序账本。本地子系统是单个包（package）（[dsh-workspace](../../packages/workspace/workspace)，`ctx.workspaceRegistry`）——一项宿主侧可选能力，不属于 agent loop（智能体循环）主干，并且对模型不可见（没有工具、没有提示词文本、没有会话事件）。它通过[存储领域数据形式](storage.zh.md)存储自己的记录，并对照 [`SessionHeader.cwd`](persistence.zh.md#sessionheader--metadata-beside-the-log) 校验会话成员资格，因此 `storageDomain` 与 `sessionPersistence` 是必需的启动依赖：持久化这一依赖不可用时，插件保持 pending，而不是把这种不可用误当作空历史。托管 Account 使用 [dsh-workspace-cloud](../../packages/workspace/workspace-cloud)（`ctx.cloudWorkspaces`）在控制面文件系统上创建空目录或 Import 公开 HTTPS git URL（每个 Account 三个、每个 1 GiB；元数据在 PostgreSQL）。设计记录：[领域 KV 存储 Agent Note（agent 决策记录）](../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.zh.md)；引导与 GUI 顺序：[Workspace UI 产品流程 Agent Note](../../.agents/notes/implemented/feature/2026-07-25-workspace-ui-product-flow.zh.md)；托管空创建：[云 Workspace Agent Note](../../.agents/notes/implemented/feature/2026-08-23-cloud-empty-workspaces-with-caps.zh.md)；公开 git Import：[git Import Agent Note](../../.agents/notes/implemented/feature/2026-08-23-public-git-workspace-import.zh.md)。
 
 源码：[`packages/workspace/workspace/src/types.ts`](../../packages/workspace/workspace/src/types.ts)
 
@@ -132,6 +132,135 @@ interface Workspace {
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxcloudworkspaces--cloudworkspaces"></a>
+
+### `ctx.cloudWorkspaces` — `CloudWorkspaces`
+
+Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or Import a public HTTPS git remote into a new slot namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.
+
+```ts cordis-catalog
+/**
+ * Whether `workspaceId` is a cloud Workspace owned by `accountId`.
+ * @param accountId - signed-in Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns true when the in-memory ownership map agrees.
+ */
+owns(accountId: AccountId, workspaceId: WorkspaceId): boolean
+
+/**
+ * Create an empty Workspace directory for `accountId`.
+ * @param accountId - owning Account.
+ * @param title - display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.
+ * @returns the registry Workspace after the PG row and directory exist.
+ */
+async createEmpty(accountId: AccountId, title?: string): Promise<Workspace>
+
+/**
+ * Import a public HTTPS git remote into a new owned Workspace slot.
+ * Clone runs in an unlisted directory under the Account prefix; the
+ * registry row is created only after clone and the 1 GiB check succeed.
+ * Private, credential-bearing, and non-HTTPS remotes throw
+ * {@link CloudWorkspaceImportUrlError} before `git` runs. A fourth
+ * Workspace throws {@link CloudWorkspaceLimitError}. A tree past 1 GiB
+ * throws {@link CloudWorkspaceQuotaError}. Clone failure throws
+ * {@link CloudWorkspaceImportError}. Failed ingest does not keep a slot.
+ * @param accountId - owning Account.
+ * @param gitUrl - public HTTPS git URL.
+ * @param title - display title; omitted or blank uses the repo basename.
+ * @param signal - optional abort from the unary RPC.
+ * @returns the registry Workspace after clone and the size check.
+ */
+async importPublicGit( accountId: AccountId, gitUrl: string, title?: string, signal?: AbortSignal, ): Promise<Workspace>
+
+/**
+ * Registry Workspaces this Account owns, in durable registry order.
+ * @param accountId - owning Account.
+ * @returns owned Workspaces that still exist in the registry.
+ */
+listOwned(accountId: AccountId): Workspace[]
+
+/**
+ * Look up one owned Workspace.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns the registry Workspace, or `undefined` when missing or not owned.
+ */
+getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined
+
+/**
+ * Delete an owned Workspace: PostgreSQL row, registry registration, and durable files.
+ * Waits for in-flight `writeFile` calls on this id, then removes the tree.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns true when a row was deleted.
+ */
+async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean>
+
+/**
+ * Delete every Workspace this Account owns, then remove the Account prefix
+ * directory. A planted symlink at that prefix is unlinked rather than followed.
+ * @param accountId - owning Account.
+ */
+async deleteAllOwned(accountId: AccountId): Promise<void>
+
+/**
+ * Write a file into an owned Workspace, refusing a tree past 1 GiB.
+ * Serialized with other writes and `deleteOwned` for the same id; a delete
+ * that already dropped the row fails as {@link CloudWorkspaceNotFoundError}.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param relativePath - file path inside the Workspace.
+ * @param data - bytes to write.
+ */
+async writeFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, data: Uint8Array, ): Promise<void>
+
+/**
+ * List regular files in an owned Workspace as POSIX-relative paths.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns sorted relative paths.
+ */
+async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]>
+
+/**
+ * Read one contained file from an owned Workspace.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param relativePath - file path inside the Workspace.
+ * @returns file bytes.
+ */
+async readFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, ): Promise<Uint8Array>
+
+/**
+ * Copy this Account's durable Workspace files into an execution-world cwd.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param world - execution-world filesystem (the E2B sandbox).
+ * @param remoteCwd - absolute sandbox working directory.
+ */
+async hydrateInto( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>
+
+/**
+ * Replace the durable Workspace with the execution-world tree, refusing a
+ * copy past 1 GiB without growing the durable copy.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param world - execution-world filesystem (the E2B sandbox).
+ * @param remoteCwd - absolute sandbox working directory.
+ */
+async copyBackFrom( accountId: AccountId, workspaceId: WorkspaceId, world: ExecutionWorld, remoteCwd: string, ): Promise<void>
+
+/**
+ * Persist a new display title on the PostgreSQL row after the registry write.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param title - new title.
+ */
+async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void>
+```
+
+Source: [`packages/workspace/workspace-cloud/src/index.ts`](../../packages/workspace/workspace-cloud/src/index.ts)
 
 <a id="ctxdirectorypicker--directorypicker-abstract-seam"></a>
 

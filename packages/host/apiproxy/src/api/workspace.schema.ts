@@ -29,11 +29,13 @@ export const workspaceListRequestSchema = z.object({}) satisfies z.ZodType<Wire<
 export const workspaceListValueSchema = z.object({
   items: z.array(workspaceViewSchema),
   archivedSessionIds: z.array(sessionIdSchema),
+  emptyCreate: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.list'>>>
 
-/** workspace.create request payload: the existing directory to adopt. */
+/** workspace.create request payload: local path adoption or cloud empty create. */
 export const workspaceCreateRequestSchema = z.object({
-  path: z.string(),
+  path: z.string().optional(),
+  title: z.string().optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'workspace.create'>>>
 
 /** workspace.create response value. */
@@ -41,6 +43,18 @@ export const workspaceCreateValueSchema = z.object({
   workspace: workspaceViewSchema,
   created: z.boolean(),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.create'>>>
+
+/** workspace.import request payload: a public HTTPS git URL. */
+export const workspaceImportRequestSchema = z.object({
+  gitUrl: z.string().min(1),
+  title: z.string().optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.import'>>>
+
+/** workspace.import response value (always a newly created Workspace). */
+export const workspaceImportValueSchema = z.object({
+  workspace: workspaceViewSchema,
+  created: z.boolean(),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.import'>>>
 
 /** workspace.rename request payload: the new title must be non-blank. */
 export const workspaceRenameRequestSchema = z.object({
@@ -98,3 +112,36 @@ export const workspaceArchiveSessionRequestSchema = z.object({
 export const workspaceArchiveSessionValueSchema = z.object({
   archivedSessionIds: z.array(sessionIdSchema),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.archiveSession'>>>
+
+/** workspace.write request payload: a utf8 file inside a cloud Workspace. */
+export const workspaceWriteRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  path: z.string().min(1),
+  data: z.string(),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.write'>>>
+
+/** workspace.write response value. */
+export const workspaceWriteValueSchema = z.object({
+  written: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.write'>>>
+
+/** workspace.listFiles request payload. */
+export const workspaceListFilesRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.listFiles'>>>
+
+/** workspace.listFiles response value. */
+export const workspaceListFilesValueSchema = z.object({
+  paths: z.array(z.string()),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.listFiles'>>>
+
+/** workspace.read request payload. */
+export const workspaceReadRequestSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  path: z.string().min(1),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.read'>>>
+
+/** workspace.read response value. */
+export const workspaceReadValueSchema = z.object({
+  data: z.string(),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.read'>>>
