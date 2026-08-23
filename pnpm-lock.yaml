@@ -8898,12 +8898,6 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
-      '@electric-sql/pglite':
-        specifier: ^0.3.15
-        version: 0.3.16
-      pg:
-        specifier: ^8.16.0
-        version: 8.23.0
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -8911,6 +8905,9 @@ importers:
       '@deepseek-ai/dsh-account':
         specifier: workspace:^
         version: link:../../account/account
+      '@deepseek-ai/dsh-account-postgres':
+        specifier: workspace:^
+        version: link:../../account/account-postgres
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
@@ -8923,9 +8920,6 @@ importers:
       '@deepseek-ai/dsh-workspace':
         specifier: workspace:^
         version: link:../workspace
-      '@types/pg':
-        specifier: ^8.15.4
-        version: 8.23.1
 
   python/sdk-runtime:
     dependencies:

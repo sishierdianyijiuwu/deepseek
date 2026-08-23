@@ -12,9 +12,9 @@ import z from '@deepseek-ai/schemastery'
 import type { AccountId } from '@deepseek-ai/dsh-account'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
+import { isUniqueViolation, openSql, type SqlClient } from '@deepseek-ai/dsh-account-postgres'
 import { writeWorkspaceFile } from './files.ts'
 import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
-import { isUniqueViolation, openSql, type SqlClient } from './sql.ts'
 
 export { SCHEMA_VERSION }
 export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError } from './files.ts'
@@ -66,7 +66,9 @@ export interface Config {
  * Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories
  * namespaced by Account, persist metadata in PostgreSQL, and enforce the
  * v1 count and size caps. The Host workspace registry still owns session
- * membership for those directories.
+ * membership for those directories. PostgreSQL is the ownership and slot
+ * source of truth: startup adopts each row into the registry by path so a
+ * wiped KV store does not hide live directories.
  */
 export class CloudWorkspaces extends Service {
   static inject = ['workspaceRegistry']
@@ -81,6 +83,7 @@ export class CloudWorkspaces extends Service {
   private root: string
   private readonly owners = new Map<string, AccountId>()
   private readonly pendingPaths = new Map<string, AccountId>()
+  private readonly writeTails = new Map<string, Promise<void>>()
 
   /**
    * @param ctx - Cordis context.
@@ -97,7 +100,7 @@ export class CloudWorkspaces extends Service {
 
   /** Open PostgreSQL, apply schema, create the file root, and load ownership. */
   protected async [Service.init](): Promise<void> {
-    const sql = await openSql(this.url)
+    const sql = await openSql(this.url, 'workspace-cloud')
     try {
       await ensureSchema(sql)
     } catch (error) {
@@ -107,7 +110,7 @@ export class CloudWorkspaces extends Service {
     this.sql = sql
     await mkdir(this.root, { recursive: true })
     this.root = await realpath(this.root)
-    await this.reloadOwners()
+    await this.restoreRegistry()
     this.ctx.effect(() => () => {
       this.sql = undefined
       this.owners.clear()
@@ -206,6 +209,7 @@ export class CloudWorkspaces extends Service {
       [workspaceId, accountId],
     )
     this.owners.delete(workspaceId)
+    this.writeTails.delete(workspaceId)
     await this.ctx.workspaceRegistry.delete(workspaceId)
     await rm(path, { recursive: true, force: true })
     return true
@@ -226,7 +230,23 @@ export class CloudWorkspaces extends Service {
   ): Promise<void> {
     const path = await this.ownedPath(accountId, workspaceId)
     if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
-    await writeWorkspaceFile(path, relativePath, data)
+    const previous = this.writeTails.get(workspaceId) ?? Promise.resolve()
+    const run = previous.then(() => writeWorkspaceFile(path, relativePath, data))
+    this.writeTails.set(workspaceId, run.then(() => undefined, () => undefined))
+    return run
+  }
+
+  /**
+   * Persist a new display title on the PostgreSQL row after the registry write.
+   * @param accountId - owning Account.
+   * @param workspaceId - Host Workspace id.
+   * @param title - new title.
+   */
+  async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void> {
+    await this.client().query(
+      'UPDATE cloud_workspaces SET title = $1, updated_at = $2 WHERE id = $3 AND account_id = $4',
+      [title, Date.now(), workspaceId, accountId],
+    )
   }
 
   private async ownedPath(accountId: AccountId, workspaceId: WorkspaceId): Promise<string | undefined> {
@@ -250,15 +270,38 @@ export class CloudWorkspaces extends Service {
     return undefined
   }
 
-  private async reloadOwners(): Promise<void> {
-    const result = await this.client().query('SELECT id, account_id FROM cloud_workspaces')
+  /**
+   * Adopt every PostgreSQL row into the workspace registry by path. A wiped
+   * KV store mints a new registry id; the row is updated to that id so slots
+   * and list stay aligned with the durable directory.
+   */
+  private async restoreRegistry(): Promise<void> {
+    const result = await this.client().query(
+      'SELECT id, account_id, title, path FROM cloud_workspaces ORDER BY slot ASC',
+    )
     this.owners.clear()
     for (const row of result.rows) {
       const id = row['id']
       const account = row['account_id']
-      if (typeof id === 'string' && typeof account === 'string') {
-        this.owners.set(id, account as AccountId)
+      const title = row['title']
+      const path = row['path']
+      if (
+        typeof id !== 'string'
+        || typeof account !== 'string'
+        || typeof title !== 'string'
+        || typeof path !== 'string'
+      ) continue
+      await mkdir(path, { recursive: true })
+      const canonical = await realpath(path)
+      const entity = await this.ctx.workspaceRegistry.create(canonical, title)
+      if (entity.title !== title) await entity.setTitle(title)
+      if (entity.id !== id || entity.path !== canonical) {
+        await this.client().query(
+          'UPDATE cloud_workspaces SET id = $1, path = $2, title = $3, updated_at = $4 WHERE id = $5',
+          [entity.id, entity.path, entity.title, Date.now(), id],
+        )
       }
+      this.owners.set(entity.id, account as AccountId)
     }
   }
 

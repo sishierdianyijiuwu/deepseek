@@ -34,3 +34,9 @@
 
     - id: ui-account
       name: '@deepseek-ai/dsh-client-ui-account'
+
+# Hosted Workspaces are cloud directories, not host folders. Disable the
+# web-app native/browse picker so host.listDirectory cannot walk another
+# Account's tree.
+- id: directory-picker
+  disabled: true

@@ -18,8 +18,8 @@ export interface CloudWorkspaceRecord {
   readonly path: string
   /** Slot 0..2 under the per-Account count cap. */
   readonly slot: number
-  /** ISO-8601 creation instant. */
-  readonly createdAt: string
-  /** ISO-8601 last-mutation instant. */
-  readonly updatedAt: string
+  /** Epoch-ms creation instant (`created_at` BIGINT). */
+  readonly createdAt: number
+  /** Epoch-ms last-mutation instant (`updated_at` BIGINT). */
+  readonly updatedAt: number
 }

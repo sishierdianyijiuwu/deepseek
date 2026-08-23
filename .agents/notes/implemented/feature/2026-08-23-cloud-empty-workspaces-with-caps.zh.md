@@ -10,11 +10,13 @@ Status: implemented
 
 ## Decision
 
-`@deepseek-ai/dsh-workspace-cloud`（`ctx.cloudWorkspaces`）是托管存储：PostgreSQL 行保存元数据，目录 `{root}/{accountId}/{dir}/` 保存字节。上限为每个 Account 三个 Workspace、每个 1 GiB 常规文件字节。`createEmpty` 填充槽位 0..2；第四次创建是 `CloudWorkspaceLimitError` / 线上 `workspace-limit`。`writeFile` 遍历目录树，并拒绝使净增长超过 1 GiB 的写入（`workspace-quota-exceeded`）。跨 Account 的列出、选择、挂载、写入和删除把该 id 当作找不到（`workspace-not-found`），与 Session 隔离一致。
+`@deepseek-ai/dsh-workspace-cloud`（`ctx.cloudWorkspaces`）是托管存储：PostgreSQL 行保存元数据（所有权、槽位、标题、路径），目录 `{root}/{accountId}/{dir}/` 保存字节。上限为每个 Account 三个 Workspace、每个 1 GiB 常规文件字节。`createEmpty` 填充槽位 0..2；第四次创建是 `CloudWorkspaceLimitError` / 线上 `workspace-limit`。`writeFile` 按 Workspace 串行化、重新读取目录树，并拒绝使净增长超过 1 GiB 的写入（`workspace-quota-exceeded`）。跨 Account 的列出、选择、挂载、写入、删除以及宿主目录浏览把该 id 或路径当作找不到／`directory-picker-unavailable`。
 
-组合该插件时，Host `workspace.list` 只返回该 Account 的 Workspace 且 `emptyCreate: true`；`workspace.create` 忽略笔记本路径并创建空目录；`session.create` 要求一个归其所有的 `workspaceId`（`workspace-required`）。现有 `workspaceRegistry` 仍拥有会话成员关系：云创建会注册新目录，因此按 cwd 挂载仍然有效。托管组合包用 `DSH_POSTGRES_URL` 与 `DSH_WORKSPACE_ROOT` 加载该插件。Web 选择器用 `emptyCreate` 在不走原生目录流程的情况下添加 Workspace。
+PostgreSQL 是槽位与所有权的真相源。启动时按路径把每一行收养进 `workspaceRegistry`，因此即使 KV 被清空仍能服务 list/create；新的注册表 id 会写回该行。标题更新同时写入两处。会话成员关系仍在注册表实体上。
 
-git Import 与 E2B 回拷不是本决策；它们必须通过同一上限摄入（`writeFile` 或等价的树写入）。
+组合该插件时，Host `workspace.list` 只返回该 Account 的 Workspace、`emptyCreate: true`，以及归在这些 Workspace 名下的已归档 Session id；`workspace.create` 忽略笔记本路径并创建空目录；`session.create` 要求一个归其所有的 `workspaceId`（`workspace-required`）。`host.pickDirectory`／`listDirectory`／`createDirectory` 失败。托管组合包禁用 `directory-picker`，并用 `DSH_POSTGRES_URL` 与 `DSH_WORKSPACE_ROOT` 加载该插件。Web 选择器用 `emptyCreate` 在不走原生目录流程的情况下添加 Workspace；空创建失败后重试的是空创建，而不是文件夹选择器。
+
+git Import 与 E2B 回拷不是本决策；它们必须通过同一上限摄入（`writeFile` 或等价的树写入）。在 E2B hydrate 成为摄入路径之前，Session cwd 上的工具写入会绕过 `writeFile`。
 
 ## Alternatives considered
 
@@ -26,4 +28,4 @@ git Import 与 E2B 回拷不是本决策；它们必须通过同一上限摄入�
 
 ## Consequences
 
-托管 UI 的添加 Workspace 不再依赖目录选择器。未组合 `cloudWorkspaces` 时，本地 `dsh web` 不变。持久字节仍是普通文件；Postgres 从不存储目录树。Import（#8）与 E2B hydrate（#9）复用 `writeFile` 的上限，而不是另做一套配额检查。
+托管 UI 的添加 Workspace 不再依赖目录选择器，托管 `/api` 也不能浏览控制面磁盘。未组合 `cloudWorkspaces` 时，本地 `dsh web` 不变。持久字节仍是普通文件；Postgres 从不存储目录树。Import（#8）与 E2B hydrate（#9）复用 `writeFile` 的上限，而不是另做一套配额检查。

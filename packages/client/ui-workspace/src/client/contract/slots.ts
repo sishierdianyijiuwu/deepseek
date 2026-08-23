@@ -12,12 +12,10 @@
  * kind): the slot a composed picker package's client half fills with its
  * picking interaction — a renderless native-chooser driver or an in-app
  * browsing dialog. ui-workspace owns the trigger (the "Add workspace…"
- * entry, present only while the hole is occupied) and the adoption
- * semantics (`createWorkspace({ path })`, the retryable error dialog,
- * Choose again); the occupant owns everything between `open` and the picked path,
- * including creating a new directory to hand back. That occupant-owned
- * creation is why adding a workspace has a single route: an unoccupied hole
- * leaves the surface with no add affordance at all.
+ * entry) and the adoption semantics. Local compositions show Add only while
+ * the hole is occupied and adopt `createWorkspace({ path })`. Cloud
+ * `emptyCreate` shows Add without a picker and calls `createWorkspace({})`.
+ * The occupant owns everything between `open` and the picked path.
  * Two holes exist because the two menu surfaces are independent slot entries
  * and a hole has exactly one declaring entry — they carry the same owner
  * contract and the same occupant.

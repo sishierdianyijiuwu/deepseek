@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
@@ -22,10 +25,19 @@ class SilentMailer extends Mailer {
 describe('sql adapter', () => {
   it('rejects a non-postgres URL and reports unique-violation codes', async () => {
     await expect(openSql('mysql://x')).rejects.toThrow(/postgres:\/\//)
+    await expect(openSql('mysql://x', 'workspace-cloud')).rejects.toThrow(/workspace-cloud/)
     expect(isUniqueViolation({ code: '23505' })).toBe(true)
     expect(isUniqueViolation({ code: '23503' })).toBe(false)
     expect(isUniqueViolation(null)).toBe(false)
     expect(isUniqueViolation('x')).toBe(false)
+  })
+
+  it('opens a directory-backed PGlite url', { timeout: 20_000 }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-pglite-'))
+    const sql = await openSql(`pglite:${dir}`)
+    expect((await sql.query('SELECT 1 AS n')).rows[0]?.['n']).toBe(1)
+    await sql.close()
+    await rm(dir, { recursive: true, force: true })
   })
 
   it('opens PGlite, migrates, nests a transaction, and refuses a foreign schema', { timeout: 20_000 }, async () => {

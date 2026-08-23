@@ -47,7 +47,7 @@ import {
 import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {
-  ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
+  ApiProxy, ConfigurableProviderView, CredentialView, DirectoryListing, GoalRef, HistoryEntry, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
@@ -1111,6 +1111,37 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     const registry = ctx.get('workspaceRegistry')
     if (registry === undefined) throw new Error('workspace registry is not composed')
     return registry
+  }
+
+  function filterArchivedSessionIds(
+    ids: readonly SessionId[],
+    viewer: AccountId | undefined = currentAccountId(),
+  ): SessionId[] {
+    if (!isolationActive()) return [...ids]
+    if (viewer === undefined) return []
+    const cloud = ctx.get('cloudWorkspaces')
+    const accounted = new Set(
+      (cloud === undefined ? workspaceRegistry().list() : cloud.listOwned(viewer))
+        .flatMap(workspace => workspace.sessionIds),
+    )
+    return ids.filter((id) => {
+      const live = ctx.sessions.get(id)
+      if (live !== undefined) return headerVisibleTo(live.header, viewer)
+      return accounted.has(id)
+    })
+  }
+
+  function visibleArchivedSessionIds(viewer: AccountId | undefined = currentAccountId()): SessionId[] {
+    return filterArchivedSessionIds(workspaceRegistry().archivedSessionIds, viewer)
+  }
+
+  function cloudDirectoryBlocked<T>(request: RpcRequest<unknown>): RpcResponse<T> | undefined {
+    if (ctx.get('cloudWorkspaces') === undefined) return undefined
+    return err(request, {
+      code: 'directory-picker-unavailable',
+      message: 'hosted Workspaces are not host directories; native and browse picking are not available',
+      details: { capability: 'cloud' },
+    })
   }
 
   function headerVisibleTo(header: SessionHeader, viewer: AccountId | undefined): boolean {
@@ -2893,7 +2924,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           : viewer === undefined ? [] : cloud.listOwned(viewer)
         return Promise.resolve(ok(request, {
           items: items.map(workspaceView),
-          archivedSessionIds: [...workspaceRegistry().archivedSessionIds],
+          archivedSessionIds: visibleArchivedSessionIds(),
           emptyCreate: cloud !== undefined,
         }))
       },
@@ -2973,6 +3004,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             throw new WorkspaceNameConflictError(title)
           }
           await workspace.setTitle(title)
+          const cloudRename = ctx.get('cloudWorkspaces')
+          const owner = currentAccountId()
+          if (cloudRename !== undefined && owner !== undefined) {
+            await cloudRename.setOwnedTitle(owner, workspace.id, title)
+          }
         })
         workspaceCreationChain = operation.then(() => undefined, () => undefined)
         try {
@@ -3056,6 +3092,20 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async archiveSession(request) {
         const { sessionId } = request.payload
+        if (isolationActive()) {
+          try {
+            await requireVisibleHeader(sessionId)
+          } catch (error: unknown) {
+            if (error instanceof SessionNotFound) {
+              return err(request, {
+                code: 'session-not-found',
+                message: error.message,
+                details: { sessionId },
+              })
+            }
+            throw error
+          }
+        }
         try {
           await workspaceRegistry().archiveSession(sessionId)
         } catch (error: unknown) {
@@ -3068,7 +3118,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId },
           })
         }
-        return ok(request, { archivedSessionIds: [...workspaceRegistry().archivedSessionIds] })
+        return ok(request, { archivedSessionIds: visibleArchivedSessionIds() })
       },
 
       async write(request) {
@@ -3125,7 +3175,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async pickDirectory(request, signal) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<{ path: string | null }>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.pickDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'native') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -3153,7 +3213,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async listDirectory(request, signal) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<DirectoryListing>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.listDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'browse') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -3176,7 +3246,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async createDirectory(request) {
-        const capability = ctx.directoryPicker.capability()
+        const blocked = cloudDirectoryBlocked<{ path: string }>(request)
+        if (blocked !== undefined) return blocked
+        const picker = ctx.get('directoryPicker')
+        if (picker === undefined) {
+          return err(request, {
+            code: 'directory-picker-unavailable',
+            message: 'host.createDirectory needs a directory picker',
+            details: { capability: 'none' },
+          })
+        }
+        const capability = picker.capability()
         if (capability.kind !== 'browse') {
           return err(request, {
             code: 'directory-picker-unavailable',
@@ -3737,7 +3817,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // Frame-dedup baseline, same posture as committedWorkspaceIds: the
         // stream opens against the current set; workspace.list re-baselines
         // reconnecting clients, so only later changes need frames.
-        let archivedSessionIds = workspaceRegistry().archivedSessionIds
+        let archivedSessionIds = visibleArchivedSessionIds(viewer)
         const disposers = [
           ctx.on('session/created', (session: Session) => {
             if (!headerVisibleTo(session.header, viewer)) return
@@ -3768,9 +3848,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             if (change.table === '') {
               if (change.operation !== 'put') return
               const state = workspaceDomainState.parse(change.value)
-              const orderChanged = state.workspaceIds.length === committedWorkspaceOrder.length
-                && state.workspaceIds.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
-                && state.workspaceIds.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
               for (const workspaceId of state.workspaceIds) {
                 if (committedWorkspaceIds.has(workspaceId)) continue
                 const workspace = workspaceRegistry().get(workspaceId)
@@ -3781,19 +3858,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                 committedWorkspaceIds.add(workspaceId)
                 queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
               }
-              committedWorkspaceOrder = [...state.workspaceIds]
+              const visibleOrder = cloud === undefined || viewer === undefined
+                ? [...state.workspaceIds]
+                : state.workspaceIds.filter(id => cloud.owns(viewer, id))
+              const orderChanged = visibleOrder.length === committedWorkspaceOrder.length
+                && visibleOrder.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
+                && visibleOrder.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
+              committedWorkspaceOrder = visibleOrder
               if (orderChanged) {
                 queue.push(frame({
                   type: 'host/workspace-order-changed',
-                  workspaceIds: [...state.workspaceIds],
+                  workspaceIds: [...visibleOrder],
                 }))
               }
-              if (state.archivedSessionIds.length !== archivedSessionIds.length
-                || state.archivedSessionIds.some((id, index) => id !== archivedSessionIds[index])) {
-                archivedSessionIds = state.archivedSessionIds
+              const nextArchived = filterArchivedSessionIds(state.archivedSessionIds, viewer)
+              if (nextArchived.length !== archivedSessionIds.length
+                || nextArchived.some((id, index) => id !== archivedSessionIds[index])) {
+                archivedSessionIds = nextArchived
                 queue.push(frame({
                   type: 'host/archived-sessions-changed',
-                  archivedSessionIds: [...state.archivedSessionIds],
+                  archivedSessionIds: [...nextArchived],
                 }))
               }
               return

@@ -21,6 +21,9 @@
       "path": "../../account/account"
     },
     {
+      "path": "../../account/account-postgres"
+    },
+    {
       "path": "../workspace"
     },
     {

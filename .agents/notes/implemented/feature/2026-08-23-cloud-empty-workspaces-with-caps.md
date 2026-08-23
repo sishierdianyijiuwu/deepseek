@@ -10,11 +10,13 @@ A hosted Account cannot pick a folder on their laptop. Workspaces have to live o
 
 ## Decision
 
-`@deepseek-ai/dsh-workspace-cloud` (`ctx.cloudWorkspaces`) is the hosted store: PostgreSQL rows for metadata, directories at `{root}/{accountId}/{dir}/` for bytes. Caps are three Workspaces per Account and 1 GiB of regular-file bytes each. `createEmpty` fills slots 0..2; a fourth create is `CloudWorkspaceLimitError` / wire `workspace-limit`. `writeFile` walks the tree and refuses net growth past 1 GiB (`workspace-quota-exceeded`). Cross-Account list, select, attach, write, and delete treat the id as missing (`workspace-not-found`), matching Session isolation.
+`@deepseek-ai/dsh-workspace-cloud` (`ctx.cloudWorkspaces`) is the hosted store: PostgreSQL rows for metadata (ownership, slot, title, path), directories at `{root}/{accountId}/{dir}/` for bytes. Caps are three Workspaces per Account and 1 GiB of regular-file bytes each. `createEmpty` fills slots 0..2; a fourth create is `CloudWorkspaceLimitError` / wire `workspace-limit`. `writeFile` serializes per Workspace, re-reads the tree, and refuses net growth past 1 GiB (`workspace-quota-exceeded`). Cross-Account list, select, attach, write, delete, and host directory browse treat the id or path as missing / `directory-picker-unavailable`.
 
-When the plugin is composed, Host `workspace.list` returns only that Account's Workspaces and `emptyCreate: true`; `workspace.create` ignores laptop paths and creates empty; `session.create` requires an owned `workspaceId` (`workspace-required`). The existing `workspaceRegistry` still owns session membership: cloud create registers the new directory so attach-by-cwd keeps working. The hosted bundle loads this plugin with `DSH_POSTGRES_URL` and `DSH_WORKSPACE_ROOT`. The Web picker uses `emptyCreate` to add a Workspace without the native directory flow.
+PostgreSQL is the source of truth for slots and ownership. Startup adopts each row into `workspaceRegistry` by path so a wiped KV store still serves list/create; a new registry id is written back to the row. Title updates write both stores. Session membership still lives on the registry entity.
 
-Git Import and E2B copy-back are not this decision; they must ingest through the same cap (`writeFile` or an equivalent tree write).
+When the plugin is composed, Host `workspace.list` returns only that Account's Workspaces, `emptyCreate: true`, and archived Session ids accounted under those Workspaces; `workspace.create` ignores laptop paths and creates empty; `session.create` requires an owned `workspaceId` (`workspace-required`). `host.pickDirectory` / `listDirectory` / `createDirectory` fail. The hosted bundle disables `directory-picker` and loads this plugin with `DSH_POSTGRES_URL` and `DSH_WORKSPACE_ROOT`. The Web picker uses `emptyCreate` to add a Workspace without the native directory flow; a failed empty create retries empty create, not a folder chooser.
+
+Git Import and E2B copy-back are not this decision; they must ingest through the same cap (`writeFile` or an equivalent tree write). Session cwd tool writes bypass `writeFile` until E2B hydrate is that ingest.
 
 ## Alternatives considered
 
@@ -26,4 +28,4 @@ Git Import and E2B copy-back are not this decision; they must ingest through the
 
 ## Consequences
 
-Hosted UI add-workspace no longer depends on a directory picker. Local `dsh web` is unchanged when `cloudWorkspaces` is absent. Durable bytes stay ordinary files; Postgres never stores the tree. Import (#8) and E2B hydrate (#9) reuse `writeFile`'s cap rather than inventing a second quota check.
+Hosted UI add-workspace no longer depends on a directory picker, and hosted `/api` cannot browse the control-plane disk. Local `dsh web` is unchanged when `cloudWorkspaces` is absent. Durable bytes stay ordinary files; Postgres never stores the tree. Import (#8) and E2B hydrate (#9) reuse `writeFile`'s cap rather than inventing a second quota check.

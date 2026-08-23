@@ -32,23 +32,22 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@deepseek-ai/schemastery": "workspace:^",
-    "@electric-sql/pglite": "^0.3.15",
-    "pg": "^8.16.0"
+    "@deepseek-ai/schemastery": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-account": "workspace:^",
+    "@deepseek-ai/dsh-account-postgres": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-workspace": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-account": "workspace:^",
+    "@deepseek-ai/dsh-account-postgres": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-storage": "workspace:^",
     "@deepseek-ai/dsh-storage-domain": "workspace:^",
     "@deepseek-ai/dsh-workspace": "workspace:^",
-    "@deepseek-ai/cordis": "workspace:^",
-    "@types/pg": "^8.15.4"
+    "@deepseek-ai/cordis": "workspace:^"
   }
 }

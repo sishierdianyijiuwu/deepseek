@@ -3,7 +3,7 @@
  * @module @deepseek-ai/dsh-workspace-cloud/schema
  */
 
-import type { SqlClient } from './sql.ts'
+import type { SqlClient } from '@deepseek-ai/dsh-account-postgres'
 
 /** Monotonic schema version stored in `cloud_workspace_schema`. */
 export const SCHEMA_VERSION = 1

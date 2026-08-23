@@ -27,13 +27,22 @@ export interface SqlClient {
 
 /**
  * Open a SQL client.
- * @param url - `postgres://…` / `postgresql://…` for `pg`, or `pglite:` for in-process PostgreSQL.
+ * @param url - `postgres://…` / `postgresql://…` for `pg`, `pglite:` for an
+ *   in-process engine, or `pglite:<dir>` for a directory-backed engine.
+ * @param label - error prefix for a non-postgres URL.
  * @returns a connected client; a failed `pg` connection rejects.
  */
-export async function openSql(url: string): Promise<SqlClient> {
+export async function openSql(url: string, label = 'account-postgres'): Promise<SqlClient> {
   if (url === 'pglite:') return new PgliteSql()
+  if (url.startsWith('pglite:')) {
+    const dataDir = url.slice('pglite:'.length)
+    if (dataDir === '') {
+      throw new Error(`${label}: url must be a postgres:// URL or pglite:`)
+    }
+    return new PgliteSql(dataDir)
+  }
   if (!url.startsWith('postgres://') && !url.startsWith('postgresql://')) {
-    throw new Error('account-postgres: url must be a postgres:// URL or pglite:')
+    throw new Error(`${label}: url must be a postgres:// URL or pglite:`)
   }
   const pool = new pg.Pool({ connectionString: url })
   await pool.query('SELECT 1')
@@ -86,8 +95,15 @@ class PgSql implements SqlClient {
 }
 
 class PgliteSql implements SqlClient {
-  private readonly db = new PGlite()
+  private readonly db: PGlite
   private nested = false
+
+  /**
+   * @param dataDir - optional directory for a durable PGlite store.
+   */
+  constructor(dataDir?: string) {
+    this.db = dataDir === undefined ? new PGlite() : new PGlite(dataDir)
+  }
 
   async query(text: string, params: readonly unknown[] = []): Promise<{ rows: Record<string, unknown>[] }> {
     const result = await this.db.query(text, params as unknown[])

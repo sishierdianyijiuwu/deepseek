@@ -27,6 +27,8 @@ import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
 import { isUniqueViolation, openSql, type SqlClient } from './sql.ts'
 
 export { SCHEMA_VERSION }
+export { isUniqueViolation, openSql } from './sql.ts'
+export type { SqlClient } from './sql.ts'
 
 /** Default verification-token lifetime (24 hours). */
 export const DEFAULT_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000

@@ -6,9 +6,9 @@ Cloud Workspaces (`ctx.cloudWorkspaces`) for the hosted control plane: an Accoun
 
 Config `url` is a `postgres://` / `postgresql://` connection string, or `pglite:` in tests. `root` is the control-plane directory that holds the trees. Missing `url` or `root`, a failed connection, or a schema version other than `SCHEMA_VERSION` (1) fails at load. The plugin injects `workspaceRegistry` so a created directory is also a Host Workspace the Session attach path already understands.
 
-`createEmpty` assigns slot 0..2; a fourth create throws `CloudWorkspaceLimitError`. `writeFile` walks the tree and refuses a write that would pass 1 GiB (`CloudWorkspaceQuotaError`). `owns` / `listOwned` / `getOwned` / `deleteOwned` are the Account isolation checks the Host `/api` uses. Another Account's id is a miss, not a distinct forbidden error.
+`createEmpty` assigns slot 0..2; a fourth create throws `CloudWorkspaceLimitError`. Startup adopts each PostgreSQL row into `workspaceRegistry` by path so a wiped KV store still lists the durable directories. `writeFile` serializes per Workspace, walks the tree, and refuses a write that would pass 1 GiB (`CloudWorkspaceQuotaError`). `owns` / `listOwned` / `getOwned` / `deleteOwned` are the Account isolation checks the Host `/api` uses. Another Account's id is a miss, not a distinct forbidden error.
 
-Git Import and E2B copy-back are later tickets; they must call `writeFile` (or an equivalent tree ingest that uses the same cap) rather than writing the durable copy directly.
+Git Import and E2B copy-back are later tickets; they must call `writeFile` (or an equivalent tree ingest that uses the same cap) rather than writing the durable copy directly. Local tool/cwd writes into the Session directory also bypass `writeFile` until E2B hydrate is the ingest path.
 
 ## Model Experience
 
@@ -21,4 +21,4 @@ None; this package neither assembles nor sends a provider request.
 ## Known Limitations and Deferred Work
 
 - **No git Import** — cloning a public repository into a new slot is a later ticket.
-- **No E2B hydrate / copy-back** — execution-world sync is a later ticket; the 1 GiB cap is enforced on `writeFile` today.
+- **No E2B hydrate / copy-back** — execution-world sync is a later ticket; the 1 GiB cap is enforced on serialized `writeFile` today. Session cwd tool writes are not this ingest.

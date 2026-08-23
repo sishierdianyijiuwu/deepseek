@@ -43,7 +43,9 @@ export interface WorkspaceApi {
    * `host/archived-sessions-changed`). Archived sessions stay in their
    * workspace's `sessionIds` account; grouping surfaces hide them.
    * When cloud Workspaces are composed, `items` is the signed-in Account's
-   * Workspaces only and `emptyCreate` is true.
+   * Workspaces only and `emptyCreate` is true. When Accounts are composed,
+   * `archivedSessionIds` is that Account's archived Sessions (live owner or
+   * accounted under its Workspaces), not the process-global set.
    */
   list(request: RpcRequest<{}>): Promise<RpcResponse<{
     items: WorkspaceView[]
@@ -70,9 +72,10 @@ export interface WorkspaceApi {
   Promise<RpcResponse<{ workspace: WorkspaceView }>>
 
   /**
-   * Removes one Workspace registration. The directory, every user file, and
-   * every session log remain untouched; those Sessions consequently become
-   * ungrouped. An unknown id fails with `workspace-not-found`.
+   * Removes one Workspace. Local: drops only the registration; the directory
+   * and session logs remain and those Sessions become ungrouped. Cloud: also
+   * deletes the PostgreSQL row and the durable control-plane tree so the
+   * Account frees a slot. An unknown id fails with `workspace-not-found`.
    */
   delete(request: RpcRequest<{ workspaceId: WorkspaceId }>):
   Promise<RpcResponse<{ deleted: true }>>
@@ -105,8 +108,9 @@ export interface WorkspaceApi {
    * disappears from every grouping surface but keeps its session log and its
    * workspace accounting slot (a future unarchive restores its position).
    * Idempotent for an already archived id. A session neither live nor in
-   * session persistence fails with `session-not-found`. Returns the full
-   * updated set (same snapshot the changed frame carries).
+   * session persistence fails with `session-not-found`. When Accounts are
+   * composed, another Account's session is that same miss, and the returned
+   * set is the viewer's archived ids (same snapshot the changed frame carries).
    */
   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>

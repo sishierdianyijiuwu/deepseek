@@ -4,9 +4,8 @@
  * wrapped by WorkspacePicker for the conversation empty-state slot
  * registration. Directory picking itself lives in the composed flow package's
  * slot occupant (see the contract module doc): this core only opens the flow,
- * adopts the picked path, and owns the error surface. Adding a workspace has
- * exactly one route — pick a host directory, new or existing — because the
- * occupant's own create-folder affordance already covers creating one.
+ * adopts the picked path, and owns the error surface. Local add picks a host
+ * directory. Cloud `emptyCreate` creates an empty Workspace without a picker.
  */
 import type { ReactNode, RefObject } from 'react'
 import { useCallback, useEffect, useState } from 'react'
@@ -218,7 +217,12 @@ export function WorkspacePickFlow({
             <Button variant="outline" className={css.modalAction} onClick={closeModal}>{t('cancel')}</Button>
             {/* Retrying needs an occupant to serve the flow; without one the
               * button would open a flow nobody can answer or cancel. */}
-            <Button variant="primary" className={css.modalAction} disabled={!flowAvailable} onClick={openDirectoryFlow}>{t('folderError.retry')}</Button>
+            <Button
+              variant="primary"
+              className={css.modalAction}
+              disabled={emptyCreate ? flowBusy : !flowAvailable}
+              onClick={emptyCreate ? () => { closeModal(); handleSelect(ADD_WORKSPACE) } : openDirectoryFlow}
+            >{t('folderError.retry')}</Button>
           </>
         )}
       >

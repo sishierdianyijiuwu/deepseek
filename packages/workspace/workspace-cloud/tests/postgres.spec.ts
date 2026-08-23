@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,7 +11,9 @@ import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/help
 import CloudWorkspaces, {
   CloudWorkspaceLimitError,
   CloudWorkspaceNotFoundError,
+  CloudWorkspaceQuotaError,
   DEFAULT_WORKSPACE_TITLE,
+  MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
 } from '../src/index.ts'
 
@@ -25,9 +27,16 @@ afterEach(async () => {
   root = undefined
 })
 
-async function boot(): Promise<{ cloud: CloudWorkspaces; files: string }> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-cloud-ws-'))
-  const files = join(root, 'files')
+async function boot(options?: { rootDir?: string; url?: string }): Promise<{
+  cloud: CloudWorkspaces
+  files: string
+  rootDir: string
+  url: string
+}> {
+  const rootDir = options?.rootDir ?? await mkdtemp(join(tmpdir(), 'dsh-cloud-ws-'))
+  root = rootDir
+  const files = join(rootDir, 'files')
+  const url = options?.url ?? 'pglite:'
   ctx = new Context()
   await ctx.plugin(Storage)
   ctx.storage.backend.register('memory', new MemoryStorageBackend())
@@ -36,8 +45,8 @@ async function boot(): Promise<{ cloud: CloudWorkspaces; files: string }> {
   ctx.provide('storageDomain', storageDomain)
   ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
   await ctx.plugin(WorkspaceRegistry)
-  await ctx.plugin(CloudWorkspaces, { url: 'pglite:', root: files }).await()
-  return { cloud: ctx.cloudWorkspaces, files }
+  await ctx.plugin(CloudWorkspaces, { url, root: files }).await()
+  return { cloud: ctx.cloudWorkspaces, files, rootDir, url }
 }
 
 describe('CloudWorkspaces', () => {
@@ -106,5 +115,43 @@ describe('CloudWorkspaces', () => {
     expect(failed).toHaveLength(1)
     expect((failed[0] as PromiseRejectedResult).reason).toBeInstanceOf(CloudWorkspaceLimitError)
     expect(cloud.listOwned(owner)).toHaveLength(3)
+  })
+
+  it('serializes writes so two near-cap files cannot both land', { timeout: 30_000 }, async () => {
+    const { cloud } = await boot()
+    const owner = accountId('quota')
+    const workspace = await cloud.createEmpty(owner)
+    const pad = await open(join(workspace.path, 'pad'), 'w')
+    await pad.truncate(MAX_WORKSPACE_BYTES - 1)
+    await pad.close()
+    const results = await Promise.allSettled([
+      cloud.writeFile(owner, workspace.id, 'a.txt', Buffer.from('x')),
+      cloud.writeFile(owner, workspace.id, 'b.txt', Buffer.from('y')),
+    ])
+    const ok = results.filter(result => result.status === 'fulfilled')
+    const failed = results.filter(result => result.status === 'rejected')
+    expect(ok).toHaveLength(1)
+    expect(failed).toHaveLength(1)
+    expect((failed[0] as PromiseRejectedResult).reason).toBeInstanceOf(CloudWorkspaceQuotaError)
+  })
+
+  it('rehydrates PG+files into an empty registry and keeps the count cap', { timeout: 30_000 }, async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'dsh-cloud-restore-'))
+    root = rootDir
+    const pg = join(rootDir, 'pg')
+    await mkdir(pg)
+    const url = `pglite:${pg}`
+    const first = await boot({ rootDir, url })
+    const owner = accountId('restore')
+    await first.cloud.createEmpty(owner, 'One')
+    await first.cloud.createEmpty(owner, 'Two')
+    const kept = await first.cloud.createEmpty(owner, 'Three')
+    await first.cloud.setOwnedTitle(owner, kept.id, 'Renamed')
+    await ctx?.fiber.dispose()
+    ctx = undefined
+
+    const second = await boot({ rootDir, url })
+    expect(second.cloud.listOwned(owner).map(item => item.title).sort()).toEqual(['One', 'Renamed', 'Two'])
+    await expect(second.cloud.createEmpty(owner)).rejects.toBeInstanceOf(CloudWorkspaceLimitError)
   })
 })

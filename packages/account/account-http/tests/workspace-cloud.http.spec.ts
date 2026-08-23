@@ -255,6 +255,10 @@ function workspaceItems(body: unknown): { workspaceId: string; path: string; tit
   return result?.value?.items ?? []
 }
 
+function archivedSessionIds(body: unknown): string[] {
+  return (body as { result?: { value?: { archivedSessionIds?: string[] } } }).result?.value?.archivedSessionIds ?? []
+}
+
 describe('Cloud Workspaces over HTTP', () => {
   it('creates empty owned Workspaces, refuses a fourth and 1 GiB, and denies cross-Account access', {
     timeout: 60_000,
@@ -300,10 +304,25 @@ describe('Cloud Workspaces over HTTP', () => {
     })).body)).toBe('workspace-not-found')
     expect(rpcError((await rpc(harness, jarB, 'session.create', { workspaceId })).body))
       .toBe('workspace-not-found')
+    const browse = await rpc(harness, jarB, 'host.listDirectory', { path: workspacePath })
+    expect(rpcError(browse.body)).toBe('directory-picker-unavailable')
+    expect(
+      (browse.body as { result?: { error?: { details?: { capability?: string } } } }).result?.error?.details
+        ?.capability,
+    ).toBe('cloud')
+    expect(rpcError((await rpc(harness, jarA, 'host.pickDirectory', {})).body))
+      .toBe('directory-picker-unavailable')
 
     const sessionA = await rpc(harness, jarA, 'session.create', { workspaceId })
     expect(sessionA.status).toBe(200)
     expect((sessionA.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const sessionId = (sessionA.body as { result?: { value?: { sessionId?: string } } }).result?.value?.sessionId
+    expect(sessionId).toEqual(expect.any(String))
+    expect((await rpc(harness, jarA, 'workspace.archiveSession', { sessionId })).status).toBe(200)
+    expect(archivedSessionIds((await rpc(harness, jarA, 'workspace.list', {})).body)).toEqual([sessionId])
+    expect(archivedSessionIds((await rpc(harness, jarB, 'workspace.list', {})).body)).toEqual([])
+    expect(rpcError((await rpc(harness, jarB, 'workspace.archiveSession', { sessionId })).body))
+      .toBe('session-not-found')
 
     await rpc(harness, jarA, 'workspace.create', { title: 'Two' })
     await rpc(harness, jarA, 'workspace.create', { title: 'Three' })
