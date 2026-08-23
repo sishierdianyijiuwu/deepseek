@@ -3,10 +3,14 @@
  * Assertions observe HTTP status, RPC bodies, and mux frames — not SQL rows.
  */
 
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer as createHttpsServer, request as httpsRequest } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { connect as tlsConnect } from 'node:tls'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -46,7 +50,11 @@ class CookieJar {
   }
 
   absorb(response: Response): void {
-    for (const line of response.headers.getSetCookie()) {
+    this.absorbSetCookie(response.headers.getSetCookie())
+  }
+
+  absorbSetCookie(lines: readonly string[]): void {
+    for (const line of lines) {
       const pair = line.split(';')[0]
       if (pair === undefined) continue
       const eq = pair.indexOf('=')
@@ -126,12 +134,19 @@ class IsolatedApiProxy extends Service {
 
 interface Harness {
   port: number
+  host: '127.0.0.1' | '0.0.0.0'
 }
 
-async function boot(): Promise<Harness> {
+const PUBLIC_HOST = 'control.example.test'
+const TLS_DIR = fileURLToPath(new URL('./fixtures/tls/', import.meta.url))
+const TLS_CERT = readFileSync(join(TLS_DIR, 'control.example.test.crt.pem'), 'utf8')
+const TLS_KEY = readFileSync(join(TLS_DIR, 'control.example.test.key.pem'), 'utf8')
+
+async function boot(options?: { trustedHosts?: string[]; cookieSecure?: boolean }): Promise<Harness> {
   mailbox.length = 0
   root = await mkdtemp(join(tmpdir(), 'dsh-account-sessions-'))
   const configPath = join(root, 'cordis.yml')
+  const trustedHosts = options?.trustedHosts ?? []
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-host-webserver'",
     '  config:',
@@ -143,11 +158,15 @@ async function boot(): Promise<Harness> {
     "    url: 'pglite:'",
     "    publicBaseUrl: 'http://127.0.0.1'",
     "- name: '@deepseek-ai/dsh-account-http'",
+    ...(options?.cookieSecure === true ? ['  config:', '    cookieSecure: true'] : []),
     "- name: '@deepseek-ai/dsh-session'",
     "- name: '@deepseek-ai/dsh-user-questions'",
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: 'test-api-proxy'",
     "- name: '@deepseek-ai/dsh-client-connection'",
+    ...(trustedHosts.length > 0
+      ? ['  config:', '    trustedHosts:', ...trustedHosts.map(host => `      - '${host}'`)]
+      : []),
     '',
   ].join('\n'))
 
@@ -178,7 +197,81 @@ async function boot(): Promise<Harness> {
     config: { path: pathToFileURL(configPath).href },
   })
   await context.loader.await()
-  return { port: context.webServer.port }
+  return { port: context.webServer.port, host: context.webServer.host }
+}
+
+async function listenTlsProxy(upstreamPort: number): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = createHttpsServer({ key: TLS_KEY, cert: TLS_CERT }, (req: IncomingMessage, res: ServerResponse) => {
+    const upstream = httpRequest({
+      hostname: '127.0.0.1',
+      port: upstreamPort,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    }, (up) => {
+      res.writeHead(up.statusCode ?? 502, up.headers)
+      up.pipe(res)
+    })
+    upstream.on('error', () => {
+      if (!res.headersSent) res.writeHead(502)
+      res.end()
+    })
+    req.pipe(upstream)
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('tls proxy missing address')
+  return {
+    port: address.port,
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) reject(error)
+        else resolve()
+      })
+    }),
+  }
+}
+
+function throughProxy(
+  proxyPort: number,
+  path: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; cookie?: string } = {},
+): Promise<{ status: number; body: string; setCookie: string[] }> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = {
+      host: `${PUBLIC_HOST}:${String(proxyPort)}`,
+      ...init.headers,
+    }
+    if (init.cookie !== undefined && init.cookie !== '') headers.cookie = init.cookie
+    const req = httpsRequest({
+      hostname: '127.0.0.1',
+      port: proxyPort,
+      path,
+      method: init.method ?? 'GET',
+      servername: PUBLIC_HOST,
+      ca: TLS_CERT,
+      headers,
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk) => { chunks.push(chunk as Buffer) })
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+          setCookie: res.headers['set-cookie'] ?? [],
+        })
+      })
+    })
+    req.on('error', reject)
+    if (init.body !== undefined) req.write(init.body)
+    req.end()
+  })
 }
 
 async function raw(
@@ -284,7 +377,11 @@ function openMux(harness: Harness, jar: CookieJar | undefined): {
     socket.once('error', (error) => { reject(error) })
   })
   socket.on('message', (data) => {
-    frames.push(String(data))
+    frames.push(Buffer.isBuffer(data)
+      ? data.toString()
+      : Array.isArray(data)
+        ? Buffer.concat(data).toString()
+        : Buffer.from(data).toString())
   })
   return {
     socket,
@@ -390,5 +487,96 @@ describe('Account-owned Sessions over HTTP', () => {
     muxA.socket.close()
     muxB.socket.close()
     expect(muxB.frames.join('\n')).not.toContain(sessionId)
+  })
+
+  it('serves signed-in /api through a TLS reverse proxy and rejects unauthenticated /api', { timeout: 60_000 }, async () => {
+    const harness = await boot({ trustedHosts: [PUBLIC_HOST], cookieSecure: true })
+    expect(harness.host).toBe('127.0.0.1')
+    const proxy = await listenTlsProxy(harness.port)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const socket = tlsConnect({ host: '127.0.0.1', port: harness.port, rejectUnauthorized: false })
+        socket.once('secureConnect', () => {
+          socket.destroy()
+          reject(new Error('dsh accepted TLS'))
+        })
+        socket.once('error', () => { resolve() })
+      })
+
+      const anonymous = await throughProxy(proxy.port, '/api/session.list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-session.list',
+          method: 'session.list',
+          payload: {},
+        }),
+      })
+      expect(anonymous.status).toBe(401)
+      expect(anonymous.body).toBe('unauthorized')
+
+      const foreignHost = await new Promise<{ status: number }>((resolve, reject) => {
+        const req = httpsRequest({
+          hostname: '127.0.0.1',
+          port: proxy.port,
+          path: '/api/session.list',
+          method: 'POST',
+          servername: PUBLIC_HOST,
+          ca: TLS_CERT,
+          headers: {
+            host: `evil.example.test:${String(proxy.port)}`,
+            'content-type': 'application/json',
+          },
+        }, (res) => {
+          res.resume()
+          resolve({ status: res.statusCode ?? 0 })
+        })
+        req.on('error', reject)
+        req.write(JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-foreign',
+          method: 'session.list',
+          payload: {},
+        }))
+        req.end()
+      })
+      expect(foreignHost.status).toBe(403)
+
+      const password = 'correct-horse'
+      const jar = new CookieJar()
+      const registered = await throughProxy(proxy.port, '/auth/register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'proxy@example.com', password }),
+      })
+      expect(registered.status).toBe(200)
+      const verify = await throughProxy(proxy.port, `/verify?token=${tokenFromMailbox()}`)
+      expect(verify.status).toBe(302)
+      const signedIn = await throughProxy(proxy.port, '/auth/sign-in', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'proxy@example.com', password }),
+      })
+      expect(signedIn.status).toBe(200)
+      expect(signedIn.setCookie.some(line => line.includes('Secure'))).toBe(true)
+      jar.absorbSetCookie(signedIn.setCookie)
+
+      const listed = await throughProxy(proxy.port, '/api/session.list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        cookie: jar.header(),
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-session.list',
+          method: 'session.list',
+          payload: {},
+        }),
+      })
+      expect(listed.status).toBe(200)
+      expect(sessionIds(JSON.parse(listed.body) as unknown)).toEqual([])
+    } finally {
+      await proxy.close()
+    }
   })
 })

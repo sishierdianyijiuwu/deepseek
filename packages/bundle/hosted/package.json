@@ -30,6 +30,8 @@
     "lib/index.js",
     "lib/invariant.js",
     "cordis.patch.yml",
+    "reverse-proxy/Caddyfile",
+    "reverse-proxy/compose.yml",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",

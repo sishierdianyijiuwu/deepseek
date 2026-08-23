@@ -1,6 +1,6 @@
 # Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write packages/bundle/hosted/README.md
-README.md: 37d1a51e4fcc9e13527ea47847c64c8c2701e7be
-README.zh.md: 97a4342d33885d43f143a7d8cd87b4381bc6ae33
+#   pnpm run verify-translation-pairing --write docs/cookbook/hosted-tls-reverse-proxy.md
+hosted-tls-reverse-proxy.md: b182246dd68b86a1c0bd5b265fb8e3092a096498
+hosted-tls-reverse-proxy.zh.md: d0f00c12f4b77c758d5f51373ad68799c6a4f9a0
