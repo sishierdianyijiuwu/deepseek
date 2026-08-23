@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-23-tls-at-reverse-proxy.md
+2026-08-23-tls-at-reverse-proxy.md: 5906d4181a80a2579b3d3ed5faf1c45599d30b92
+2026-08-23-tls-at-reverse-proxy.zh.md: bebbcb50968d0358d7bf22dec1f22d9dd7877a9f
