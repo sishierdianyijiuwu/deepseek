@@ -7,7 +7,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -35,6 +35,7 @@ let root: string | undefined
 let context: Context | undefined
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -339,6 +340,11 @@ describe('Deletion vs Ban over HTTP', () => {
     }))).toMatchObject({ ok: false, error: { code: 'email_taken' } })
     await stat(banned.workspacePath)
     await stat(banned.logPath)
+    expect(await jsonBody(await raw(harness, bannedJar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }))).toMatchObject({ ok: false, error: { code: 'forbidden' } })
     expect(sessionIds((await rpc(
       harness, operatorJar, 'session.list', {}, { [OPERATOR_ACCESS_HEADER]: 'banned@example.com' },
     )).body)).toEqual(expect.arrayContaining([banned.sessionId]))
@@ -399,5 +405,69 @@ describe('Deletion vs Ban over HTTP', () => {
     ))).toMatchObject({ ok: true, signedIn: true, email: 'keep@example.com' })
     expect(workspaceItems((await rpc(harness, keepJar, 'workspace.list', {})).body).map(item => item.path))
       .toEqual([keep.workspacePath])
+  })
+
+  it('keeps the Account when owned-data erase throws so Deletion can retry', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jar = await signInAccount(harness, 'retry@example.com', password)
+    const owned = await seedOwned(harness, jar, 'Retry')
+    vi.spyOn(context!.cloudWorkspaces, 'deleteAllOwned')
+      .mockRejectedValueOnce(new Error('injected erase failure'))
+
+    const failed = await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(failed.status).toBe(400)
+    expect(jar.header()).not.toContain(SIGN_IN_COOKIE)
+    await stat(owned.workspacePath)
+    await expect(stat(owned.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await jsonBody(await raw(harness, jar, '/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'retry@example.com', password }),
+    }))).toMatchObject({ ok: false, error: { code: 'email_taken' } })
+
+    expect(await jsonBody(await raw(harness, jar, '/auth/sign-in', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'retry@example.com', password }),
+    }))).toEqual({ ok: true })
+    expect(await jsonBody(await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }))).toEqual({ ok: true })
+    await expect(stat(owned.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await jsonBody(await raw(harness, jar, '/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'retry@example.com', password }),
+    }))).toEqual({ ok: true })
+  })
+
+  it('keeps the Account when two follow-up erases throw', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jar = await signInAccount(harness, 'aggregate@example.com', password)
+    await seedOwned(harness, jar, 'Aggregate')
+    vi.spyOn(context!.cloudWorkspaces, 'deleteAllOwned')
+      .mockRejectedValue(new Error('injected workspace erase'))
+    vi.spyOn(context!.sessionPersistence, 'deleteOwned')
+      .mockRejectedValue(new Error('injected session erase'))
+    expect((await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).status).toBe(400)
+    expect(await jsonBody(await raw(harness, jar, '/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'aggregate@example.com', password }),
+    }))).toMatchObject({ ok: false, error: { code: 'email_taken' } })
   })
 })

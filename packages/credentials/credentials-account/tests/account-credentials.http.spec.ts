@@ -7,7 +7,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -28,6 +28,7 @@ let root: string | undefined
 let context: Context | undefined
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -104,7 +105,7 @@ interface Harness {
   port: number
 }
 
-async function boot(): Promise<Harness> {
+async function boot(overrides?: { operatorEmails?: string[] }): Promise<Harness> {
   mailbox.length = 0
   root = await mkdtemp(join(tmpdir(), 'dsh-account-credentials-'))
   const configPath = join(root, 'cordis.yml')
@@ -118,6 +119,12 @@ async function boot(): Promise<Harness> {
     '  config:',
     "    url: 'pglite:'",
     "    publicBaseUrl: 'http://127.0.0.1'",
+    ...(overrides?.operatorEmails !== undefined
+      ? [
+        '    operatorEmails:',
+        ...overrides.operatorEmails.map(email => `      - '${email}'`),
+      ]
+      : []),
     "- name: '@deepseek-ai/dsh-account-http'",
     "- name: '@deepseek-ai/dsh-credentials-account'",
     '  config:',
@@ -348,5 +355,83 @@ describe('Account-scoped Credentials over HTTP', () => {
     expect(credentialView((await rpc(harness, jarB, 'credentials.describe', {
       refs: ['DEEPSEEK_API_KEY'],
     })).body, 'DEEPSEEK_API_KEY')).toMatchObject({ configured: true, source: 'account' })
+  })
+
+  it('Ban leaves the Credential document; Deletion removes it', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['ops@example.com'] })
+    const password = 'correct-horse'
+    const operatorJar = await signInAccount(harness, 'ops@example.com', password)
+    const bannedJar = await signInAccount(harness, 'banned@example.com', password)
+    const goneJar = await signInAccount(harness, 'gone@example.com', password)
+    expect((await rpc(harness, bannedJar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY', value: 'secret-banned',
+    })).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
+    expect((await rpc(harness, goneJar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY', value: 'secret-gone',
+    })).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
+    const bannedSession = (await rpc(harness, bannedJar, 'session.create', {})).body as {
+      result?: { value?: { sessionId: string } }
+    }
+    const goneSession = (await rpc(harness, goneJar, 'session.create', {})).body as {
+      result?: { value?: { sessionId: string } }
+    }
+    const bannedOwner = context!.sessions.get(bannedSession.result!.value!.sessionId as never)?.header.owner
+    const goneOwner = context!.sessions.get(goneSession.result!.value!.sessionId as never)?.header.owner
+    expect(bannedOwner).toEqual(expect.any(String))
+    expect(goneOwner).toEqual(expect.any(String))
+    const bannedFile = join(root!, 'credentials', `${bannedOwner!}.json`)
+    const goneFile = join(root!, 'credentials', `${goneOwner!}.json`)
+    await stat(bannedFile)
+    await stat(goneFile)
+    expect((await raw(harness, operatorJar, '/auth/operator/ban', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'banned@example.com' }),
+    })).status).toBe(200)
+    await stat(bannedFile)
+    expect(credentialView((await rpc(harness, operatorJar, 'credentials.describe', {
+      refs: ['DEEPSEEK_API_KEY'],
+    })).body, 'DEEPSEEK_API_KEY')).toMatchObject({ configured: false })
+    expect((await raw(harness, goneJar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).status).toBe(200)
+    await expect(stat(goneFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    await stat(bannedFile)
+  })
+
+  it('keeps the Credential document when eraseOwned throws so Deletion can retry', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jar = await signInAccount(harness, 'retry@example.com', password)
+    expect((await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY', value: 'secret-retry',
+    })).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
+    const created = await rpc(harness, jar, 'session.create', {})
+    const sessionId = (created.body as { result?: { value?: { sessionId: string } } }).result?.value?.sessionId
+    const owner = context!.sessions.get(sessionId as never)?.header.owner
+    const file = join(root!, 'credentials', `${owner!}.json`)
+    await stat(file)
+    vi.spyOn(context!.credentials, 'eraseOwned').mockRejectedValueOnce(new Error('injected erase failure'))
+    expect((await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).status).toBe(400)
+    await stat(file)
+    expect((await raw(harness, jar, '/auth/sign-in', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'retry@example.com', password }),
+    })).status).toBe(200)
+    expect((await raw(harness, jar, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).status).toBe(200)
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

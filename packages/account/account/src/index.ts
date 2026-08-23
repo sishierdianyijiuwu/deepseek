@@ -176,7 +176,7 @@ export abstract class Accounts extends Service {
   /**
    * Erase this Account row and CASCADE Sign-in sessions, verification tokens,
    * and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions,
-   * Workspaces, and Credentials after this returns. Unknown ids are `not_found`.
+   * Workspaces, and Credentials before calling this. Unknown ids are `not_found`.
    * @param id - opaque Account id of the signed-in caller.
    * @returns `{ ok: true }` when the row was deleted, or `not_found`.
    */

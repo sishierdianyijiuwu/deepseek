@@ -22,10 +22,17 @@ export const MAX_AUTH_BODY_BYTES = 64 * 1024
 export interface Config {
   /** Set the cookie Secure flag (HTTPS reverse-proxy deployments). */
   cookieSecure?: boolean
+  /**
+   * When true, Deletion fails unless `cloudWorkspaces`, `credentials`, and
+   * `sessionPersistence` are composed. The hosted patch sets this; auth-only
+   * tests leave it false so a row-only composition still deletes the Account.
+   */
+  requireOwnedErase?: boolean
 }
 
 export const Config: z<Config> = z.object({
   cookieSecure: z.boolean().default(false),
+  requireOwnedErase: z.boolean().default(false),
 })
 
 /** Stable Cordis plugin name. */
@@ -41,10 +48,11 @@ export const inject = ['webServer', 'accounts']
  */
 export function apply(ctx: Context, config: Config): void {
   const secure = config.cookieSecure === true
+  const requireOwnedErase = config.requireOwnedErase === true
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/auth',
-    handler: (req, res) => handleAuth(req, res, ctx, secure),
+    handler: (req, res) => handleAuth(req, res, ctx, secure, requireOwnedErase),
   }), 'account-http: /auth')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -64,12 +72,14 @@ export function apply(ctx: Context, config: Config): void {
  * @param res - response to write.
  * @param ctx - Cordis context with `accounts` and optional owned-data services.
  * @param cookieSecure - cookie Secure flag.
+ * @param requireOwnedErase - fail Deletion when a hosted follow-up service is missing.
  */
 export async function handleAuth(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: Context,
   cookieSecure: boolean,
+  requireOwnedErase = false,
 ): Promise<void> {
   const accounts = ctx.accounts
   /* v8 ignore next -- node:http always sets url/method on server requests */
@@ -189,9 +199,14 @@ export async function handleAuth(
       writeJson(res, 200, failure('forbidden', 'Not allowed'))
       return
     }
-    await accounts.deleteAccount(session.accountId)
-    await eraseOwnedData(ctx, session.accountId)
-    res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, '', 0, cookieSecure))
+    try {
+      await eraseOwnedData(ctx, session.accountId, requireOwnedErase)
+      await accounts.deleteAccount(session.accountId)
+    } finally {
+      if (!res.headersSent) {
+        res.setHeader('set-cookie', serializeCookie(SIGN_IN_COOKIE, '', 0, cookieSecure))
+      }
+    }
     writeJson(res, 200, { ok: true })
     return
   }
@@ -372,17 +387,53 @@ async function requireOperator(
 }
 
 /**
- * Erase Workspaces, Credentials, and Session logs the deleted Account owned.
- * Missing optional services are skipped so auth-only compositions still delete
- * the Account row.
+ * Erase Workspaces, Credentials, and Session logs the Account owns, then the
+ * caller deletes the Account row. Each composed service runs even if another
+ * throws; failures are collected and rethrown so a retry can finish.
  * @param ctx - Cordis context that may carry those services.
  * @param accountId - Account whose owned data is erased.
+ * @param requireOwnedErase - throw when a hosted follow-up service is missing.
  */
-async function eraseOwnedData(ctx: Context, accountId: AccountId): Promise<void> {
+async function eraseOwnedData(
+  ctx: Context,
+  accountId: AccountId,
+  requireOwnedErase: boolean,
+): Promise<void> {
   const cloud = ctx.get('cloudWorkspaces')
-  if (cloud !== undefined) await cloud.deleteAllOwned(accountId)
-  await ctx.get('credentials')?.eraseOwned(accountId)
-  await ctx.get('sessionPersistence')?.deleteOwned(accountId)
+  const credentials = ctx.get('credentials')
+  const persistence = ctx.get('sessionPersistence')
+  if (requireOwnedErase
+    && (cloud === undefined || credentials === undefined || persistence === undefined)) {
+    throw new Error(
+      'account-http: Deletion requires cloudWorkspaces, credentials, and sessionPersistence',
+    )
+  }
+  const errors: unknown[] = []
+  if (cloud !== undefined) {
+    try {
+      await cloud.deleteAllOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (credentials !== undefined) {
+    try {
+      await credentials.eraseOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (persistence !== undefined) {
+    try {
+      await persistence.deleteOwned(accountId)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'account-http: owned-data erase failed')
+  }
 }
 
 async function handleOperatorBan(

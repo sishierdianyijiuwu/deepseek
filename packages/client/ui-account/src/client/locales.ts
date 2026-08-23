@@ -1,4 +1,4 @@
-/** `account` namespace dictionaries (register / sign-in / sign-out copy). */
+/** `account` namespace dictionaries (register / sign-in / sign-out / Deletion copy). */
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {

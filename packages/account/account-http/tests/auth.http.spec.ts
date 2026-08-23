@@ -83,6 +83,7 @@ async function boot(overrides?: {
   signInTtlMs?: number
   passwordResetTtlMs?: number
   operatorEmails?: string[]
+  requireOwnedErase?: boolean
 }): Promise<Harness> {
   mailbox.length = 0
   failSend = false
@@ -114,6 +115,12 @@ async function boot(overrides?: {
       ]
       : []),
     "- name: '@deepseek-ai/dsh-account-http'",
+    ...(overrides?.requireOwnedErase === true
+      ? [
+        '  config:',
+        '    requireOwnedErase: true',
+      ]
+      : []),
     '',
   ].join('\n'))
 
@@ -789,5 +796,42 @@ describe('Deletion', () => {
     expect((await post(harness, '/auth/delete', {})).json)
       .toMatchObject({ ok: false, error: { code: 'forbidden' } })
     expect((await request(harness, '/auth/delete', { method: 'GET' })).status).toBe(405)
+  })
+
+  it('refuses Deletion with a Banned Sign-in cookie', { timeout: 60_000 }, async () => {
+    const harness = await boot({ operatorEmails: ['ops@example.com'] })
+    const password = 'correct-horse'
+    const target = 'banned-delete@example.com'
+    const operatorJar = new CookieJar()
+    expect((await post(harness, '/auth/register', { email: target, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/register', { email: 'ops@example.com', password })).json)
+      .toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email: 'ops@example.com', password }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/sign-in', { email: target, password })).json).toEqual({ ok: true })
+    expect((await post(harness, '/auth/operator/ban', { email: target }, operatorJar)).json)
+      .toEqual({ ok: true })
+    expect((await post(harness, '/auth/delete', {})).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await post(harness, '/auth/register', { email: target, password })).json)
+      .toMatchObject({ ok: false, error: { code: 'email_taken' } })
+  })
+
+  it('keeps the Account when requireOwnedErase is set and follow-up services are missing', {
+    timeout: 60_000,
+  }, async () => {
+    const harness = await boot({ requireOwnedErase: true })
+    const email = 'need-peers@example.com'
+    const password = 'correct-horse'
+    expect((await post(harness, '/auth/register', { email, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email, password })).json).toEqual({ ok: true })
+    expect((await post(harness, '/auth/delete', {})).status).toBe(400)
+    expect(harness.jar.hasSignIn()).toBe(false)
+    expect((await post(harness, '/auth/register', { email, password })).json)
+      .toMatchObject({ ok: false, error: { code: 'email_taken' } })
+    expect((await post(harness, '/auth/sign-in', { email, password })).json).toEqual({ ok: true })
   })
 })

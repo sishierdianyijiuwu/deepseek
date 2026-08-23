@@ -145,7 +145,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract deleteAccount(id: AccountId): Promise<DeleteResult>',
-        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials after this returns. Unknown ids are `not_found`.',
+        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials before calling this. Unknown ids are `not_found`.',
         parameters: [{ name: 'id', description: 'opaque Account id of the signed-in caller.' }],
         returns: '`{ ok: true }` when the row was deleted, or `not_found`.',
       },

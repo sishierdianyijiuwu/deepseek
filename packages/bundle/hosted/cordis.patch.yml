@@ -38,6 +38,7 @@
       name: '@deepseek-ai/dsh-account-http'
       config:
         cookieSecure: !!js process.env.DSH_COOKIE_SECURE === '1'
+        requireOwnedErase: true
 
     - id: ui-account
       name: '@deepseek-ai/dsh-client-ui-account'
