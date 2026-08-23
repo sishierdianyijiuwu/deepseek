@@ -497,6 +497,29 @@ describe('auth HTTP', () => {
       .toEqual({ ok: true })
   })
 
+  it('lets only one concurrent reset consume the token', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'race-reset@example.com'
+    const password = 'correct-horse'
+    await post(harness, '/auth/register', { email, password })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    await post(harness, '/auth/request-password-reset', { email })
+    const token = tokenFromMailbox('reset')
+    const concurrent = await Promise.all([
+      post(harness, '/auth/reset-password', { token, password: 'correct-zebra' }),
+      post(harness, '/auth/reset-password', { token, password: 'correct-yak12' }),
+    ])
+    const outcomes = concurrent.map((row) => {
+      const body = row.json as { ok: boolean; error?: { code: string } }
+      return body.ok ? 'ok' : body.error?.code
+    })
+    expect(outcomes.sort()).toEqual(['invalid_or_expired', 'ok'])
+    const zebra = await post(harness, '/auth/sign-in', { email, password: 'correct-zebra' })
+    const yak = await post(harness, '/auth/sign-in', { email, password: 'correct-yak12' })
+    const signedIn = [zebra, yak].filter(row => (row.json as { ok: boolean }).ok)
+    expect(signedIn).toHaveLength(1)
+  })
+
   it('expires a password-reset token under a fake clock', { timeout: 60_000 }, async () => {
     const harness = await boot({ passwordResetTtlMs: 30 })
     const email = 'expire-reset@example.com'

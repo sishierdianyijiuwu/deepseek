@@ -134,6 +134,33 @@ describe('postgres accounts', () => {
     })
     await ctx.fiber.dispose()
   })
+
+  it('lets only one concurrent resetPassword consume the token', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+    }).await()
+    const accounts = ctx.accounts
+    await accounts.register('race@example.com', 'password12')
+    const verifyToken = /token=([0-9a-f]+)/.exec(mailbox[0]?.text ?? '')?.[1]
+    expect(verifyToken).toBeDefined()
+    await accounts.verifyEmail(verifyToken!)
+    await accounts.requestPasswordReset('race@example.com')
+    const resetToken = /\/reset\?token=([0-9a-f]+)/.exec(mailbox.at(-1)?.text ?? '')?.[1]
+    expect(resetToken).toBeDefined()
+    const concurrent = await Promise.all([
+      accounts.resetPassword(resetToken!, 'password99'),
+      accounts.resetPassword(resetToken!, 'password88'),
+    ])
+    const outcomes = concurrent.map(row => row.ok ? 'ok' : row.error)
+    expect(outcomes.sort()).toEqual(['invalid_or_expired', 'ok'])
+    const winner = concurrent.find(row => row.ok)
+    expect(winner).toBeDefined()
+    await ctx.fiber.dispose()
+  })
 })
 
 describe('invariant companion', () => {

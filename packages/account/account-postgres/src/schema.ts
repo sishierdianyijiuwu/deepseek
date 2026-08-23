@@ -33,13 +33,13 @@ const DDL: readonly string[] = [
 )`,
   `CREATE TABLE IF NOT EXISTS password_reset_tokens (
   token_hash TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
   expires_at BIGINT NOT NULL
 )`,
 ]
 
 /**
- * Apply the v1 schema or refuse a foreign version.
+ * Apply the current schema or refuse a foreign version.
  * @param sql - connected client.
  */
 export async function ensureSchema(sql: SqlClient): Promise<void> {

@@ -325,18 +325,16 @@ export class PostgresAccounts extends Accounts {
     const now = Date.now()
     const updated = await this.client().transaction(async (sql) => {
       const found = await sql.query(
-        'SELECT id, email, password_hash, verified_at FROM accounts WHERE email_normalized = $1',
+        'SELECT id, verified_at FROM accounts WHERE email_normalized = $1 FOR UPDATE',
         [normalized],
       )
-      const account = found.rows[0] as AccountRow | undefined
+      const account = found.rows[0] as Pick<AccountRow, 'id' | 'verified_at'> | undefined
       if (account === undefined || account.verified_at == null) return false
       await sql.query(
-        'DELETE FROM password_reset_tokens WHERE account_id = $1',
-        [account.id],
-      )
-      await sql.query(
         `INSERT INTO password_reset_tokens (token_hash, account_id, expires_at)
-         VALUES ($1, $2, $3)`,
+         VALUES ($1, $2, $3)
+         ON CONFLICT (account_id) DO UPDATE
+         SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at`,
         [token.hash, account.id, now + this.passwordResetTtlMs],
       )
       return true
@@ -360,21 +358,19 @@ export class PostgresAccounts extends Accounts {
     if (token.length === 0) return { ok: false, error: 'invalid_or_expired' }
     const tokenHash = hashSecret(token)
     const now = Date.now()
-    const passwordHash = await hashPassword(password)
     return this.client().transaction(async (sql) => {
       const found = await sql.query(
-        'SELECT account_id FROM password_reset_tokens WHERE token_hash = $1 AND expires_at > $2',
+        `DELETE FROM password_reset_tokens
+         WHERE token_hash = $1 AND expires_at > $2
+         RETURNING account_id`,
         [tokenHash, now],
       )
       const row = found.rows[0] as TokenRow | undefined
       if (row === undefined) return { ok: false, error: 'invalid_or_expired' }
+      const passwordHash = await hashPassword(password)
       await sql.query(
         'UPDATE accounts SET password_hash = $1 WHERE id = $2',
         [passwordHash, row.account_id],
-      )
-      await sql.query(
-        'DELETE FROM password_reset_tokens WHERE account_id = $1',
-        [row.account_id],
       )
       await sql.query(
         'DELETE FROM sign_in_sessions WHERE account_id = $1',

@@ -12,7 +12,7 @@ Status: implemented
 
 密码重置与滑动有效期落在现有 Account seam 上（[包](../architecture/2026-08-23-account-mailer-postgres-seam.zh.md)）。
 
-`requestPasswordReset(email)` 对未知、Unverified 或无效地址是静默成功，以免 HTTP 路由枚举 Account。已验证 Account 得到一次性、以 SHA-256 存储的令牌，寿命为 `passwordResetTtlMs`（默认 1 小时）；再次请求会删除前一个令牌。该发送上的 mailer 失败也是静默的。`resetPassword(token, password)` 在 Password 过短时拒绝且不消费令牌，未知或过期令牌返回 `invalid_or_expired`；成功时替换 Password 哈希、删除该 Account 的重置令牌，并删除每一个 Sign-in session 行。
+`requestPasswordReset(email)` 对未知、Unverified 或无效地址是静默成功，以免 HTTP 路由枚举 Account。已验证 Account 得到一次性、以 SHA-256 存储的令牌，寿命为 `passwordResetTtlMs`（默认 1 小时）。`account_id` 唯一；再次请求会 `UPSERT` 该行。该发送上的 mailer 失败也是静默的。`resetPassword(token, password)` 在 Password 过短时拒绝且不消费令牌。仍有效的令牌在 scrypt 之前用 `DELETE … RETURNING` 消费；零行则是 `invalid_or_expired`。成功时再替换 Password 哈希并删除每一个 Sign-in session 行。
 
 `GET /reset?token=` 是具名宿主路由，因为 `frontend-static` 对未知路径返回 404。HEAD 返回 200 且不消费令牌（邮件扫描器）。GET 重定向到 `/?reset=<token>` 且不消费；overlay 再 POST `/auth/reset-password`。重置成功会清除 `dsh_sign_in` cookie。
 
@@ -34,7 +34,7 @@ HTTP 测试用 spy `Date.now` 作为假时钟，并继续使用假 Mailer 子类
 
 ## 测试
 
-带 PGlite、假邮件发送和假 `Date.now` 时钟的 Loader 组合 HTTP 钉住：已验证请求会发信；未知／Unverified／mailer 失败保持静默；有效令牌设置新 Password 且不能复用；两个 cookie jar 在重置后 `/auth/me` 都失败；空闲 13 天后 `/auth/me` 仍登录并刷新 `Max-Age`；14 天不 lookup 则过期；登录 Set-Cookie 带 `Max-Age`，因此不是会话 cookie。overlay 测试钉住忘记／重置界面和 `/?reset=` 落地。
+带 PGlite、假邮件发送和假 `Date.now` 时钟的 Loader 组合 HTTP 钉住：已验证请求会发信；未知／Unverified／mailer 失败保持静默；有效令牌设置新 Password 且不能复用；两次并发 POST 同一令牌得到一个 `{ ok: true }` 和一个 `invalid_or_expired`；两个 cookie jar 在重置后 `/auth/me` 都失败；空闲 13 天后 `/auth/me` 仍登录并刷新 `Max-Age`；14 天不 lookup 则过期；登录 Set-Cookie 带 `Max-Age`，因此不是会话 cookie。overlay 测试钉住忘记／重置界面和 `/?reset=` 落地。
 
 ## 后果
 

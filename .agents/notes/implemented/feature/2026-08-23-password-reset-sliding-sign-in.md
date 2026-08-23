@@ -12,7 +12,7 @@ A verified Account that forgot the Password has no recovery path. A Sign-in sess
 
 Password reset and sliding lifetime live on the existing Account seam ([packages](../architecture/2026-08-23-account-mailer-postgres-seam.md)).
 
-`requestPasswordReset(email)` is a silent success for unknown, Unverified, or invalid addresses so the HTTP route cannot enumerate Accounts. A verified Account gets a single-use SHA-256-stored token with `passwordResetTtlMs` (default 1 hour); a later request deletes the previous token. Mailer failure on that send is also silent. `resetPassword(token, password)` rejects a short Password without consuming the token, rejects an unknown or expired token as `invalid_or_expired`, and on success replaces the Password hash, deletes that Account's reset tokens, and deletes every Sign-in session row.
+`requestPasswordReset(email)` is a silent success for unknown, Unverified, or invalid addresses so the HTTP route cannot enumerate Accounts. A verified Account gets a single-use SHA-256-stored token with `passwordResetTtlMs` (default 1 hour). `account_id` is unique; a later request `UPSERT`s that row. Mailer failure on that send is also silent. `resetPassword(token, password)` rejects a short Password without consuming the token. A still-valid token is consumed with `DELETE … RETURNING` before scrypt; zero rows is `invalid_or_expired`. On success it then replaces the Password hash and deletes every Sign-in session row.
 
 `GET /reset?token=` is a named host route because `frontend-static` 404s unknown pathnames. HEAD returns 200 and does not consume the token (mail scanners). GET redirects to `/?reset=<token>` without consuming it; the overlay POSTs `/auth/reset-password`. A successful reset clears the `dsh_sign_in` cookie.
 
@@ -34,7 +34,7 @@ HTTP tests spy `Date.now` as the fake clock and keep the fake Mailer subclass.
 
 ## Testing
 
-Loader-composed HTTP with PGlite, a fake mailer, and a fake `Date.now` clock pins: verified request sends mail; unknown/Unverified/mailer-fail stay silent; a valid token sets a new Password and cannot be reused; two cookie jars both fail `/auth/me` after reset; `/auth/me` after 13 idle days still signs in and refreshes `Max-Age`; 14 idle days without a lookup expires; `Max-Age` is present on sign-in so the cookie is not a session cookie. Overlay tests pin forgot/reset screens and the `/?reset=` landing.
+Loader-composed HTTP with PGlite, a fake mailer, and a fake `Date.now` clock pins: verified request sends mail; unknown/Unverified/mailer-fail stay silent; a valid token sets a new Password and cannot be reused; two concurrent POSTs with the same token yield one `{ ok: true }` and one `invalid_or_expired`; two cookie jars both fail `/auth/me` after reset; `/auth/me` after 13 idle days still signs in and refreshes `Max-Age`; 14 idle days without a lookup expires; `Max-Age` is present on sign-in so the cookie is not a session cookie. Overlay tests pin forgot/reset screens and the `/?reset=` landing.
 
 ## Consequences
 
