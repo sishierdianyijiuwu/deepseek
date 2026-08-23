@@ -135,6 +135,31 @@ describe('CloudWorkspaces', () => {
     expect((failed[0] as PromiseRejectedResult).reason).toBeInstanceOf(CloudWorkspaceQuotaError)
   })
 
+  it('waits in-flight writes before delete so the tree stays gone', { timeout: 30_000 }, async () => {
+    const { cloud } = await boot()
+    const owner = accountId('delete-race')
+    const workspace = await cloud.createEmpty(owner)
+    const path = workspace.path
+    const results = await Promise.allSettled([
+      cloud.writeFile(owner, workspace.id, 'a.txt', Buffer.from('x')),
+      cloud.writeFile(owner, workspace.id, 'b.txt', Buffer.from('y')),
+      cloud.deleteOwned(owner, workspace.id),
+    ])
+    const deleted = results[2]
+    expect(deleted.status).toBe('fulfilled')
+    if (deleted.status === 'fulfilled') expect(deleted.value).toBe(true)
+    for (const result of results.slice(0, 2)) {
+      if (result.status === 'rejected') {
+        expect(result.reason).toBeInstanceOf(CloudWorkspaceNotFoundError)
+      }
+    }
+    expect(cloud.owns(owner, workspace.id)).toBe(false)
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(cloud.writeFile(owner, workspace.id, 'after.txt', Buffer.from('z')))
+      .rejects.toBeInstanceOf(CloudWorkspaceNotFoundError)
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('rehydrates PG+files into an empty registry and keeps the count cap', { timeout: 30_000 }, async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'dsh-cloud-restore-'))
     root = rootDir

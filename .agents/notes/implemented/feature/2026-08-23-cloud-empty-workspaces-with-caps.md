@@ -10,7 +10,7 @@ A hosted Account cannot pick a folder on their laptop. Workspaces have to live o
 
 ## Decision
 
-`@deepseek-ai/dsh-workspace-cloud` (`ctx.cloudWorkspaces`) is the hosted store: PostgreSQL rows for metadata (ownership, slot, title, path), directories at `{root}/{accountId}/{dir}/` for bytes. Caps are three Workspaces per Account and 1 GiB of regular-file bytes each. `createEmpty` fills slots 0..2; a fourth create is `CloudWorkspaceLimitError` / wire `workspace-limit`. `writeFile` serializes per Workspace, re-reads the tree, and refuses net growth past 1 GiB (`workspace-quota-exceeded`). Cross-Account list, select, attach, write, delete, and host directory browse treat the id or path as missing / `directory-picker-unavailable`.
+`@deepseek-ai/dsh-workspace-cloud` (`ctx.cloudWorkspaces`) is the hosted store: PostgreSQL rows for metadata (ownership, slot, title, path), directories at `{root}/{accountId}/{dir}/` for bytes. Caps are three Workspaces per Account and 1 GiB of regular-file bytes each. `createEmpty` fills slots 0..2; a fourth create is `CloudWorkspaceLimitError` / wire `workspace-limit`. `writeFile` and `deleteOwned` serialize on one per-Workspace chain (`writeFile` re-checks ownership after prior ops, re-reads the tree, and refuses net growth past 1 GiB / `workspace-quota-exceeded`). Cross-Account list, select, attach, write, delete, and host directory browse treat the id or path as missing / `directory-picker-unavailable`.
 
 PostgreSQL is the source of truth for slots and ownership. Startup adopts each row into `workspaceRegistry` by path so a wiped KV store still serves list/create; a new registry id is written back to the row. Title updates write both stores. Session membership still lives on the registry entity.
 

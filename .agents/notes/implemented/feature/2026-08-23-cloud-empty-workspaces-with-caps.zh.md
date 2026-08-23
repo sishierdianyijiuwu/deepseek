@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-`@deepseek-ai/dsh-workspace-cloud`（`ctx.cloudWorkspaces`）是托管存储：PostgreSQL 行保存元数据（所有权、槽位、标题、路径），目录 `{root}/{accountId}/{dir}/` 保存字节。上限为每个 Account 三个 Workspace、每个 1 GiB 常规文件字节。`createEmpty` 填充槽位 0..2；第四次创建是 `CloudWorkspaceLimitError` / 线上 `workspace-limit`。`writeFile` 按 Workspace 串行化、重新读取目录树，并拒绝使净增长超过 1 GiB 的写入（`workspace-quota-exceeded`）。跨 Account 的列出、选择、挂载、写入、删除以及宿主目录浏览把该 id 或路径当作找不到／`directory-picker-unavailable`。
+`@deepseek-ai/dsh-workspace-cloud`（`ctx.cloudWorkspaces`）是托管存储：PostgreSQL 行保存元数据（所有权、槽位、标题、路径），目录 `{root}/{accountId}/{dir}/` 保存字节。上限为每个 Account 三个 Workspace、每个 1 GiB 常规文件字节。`createEmpty` 填充槽位 0..2；第四次创建是 `CloudWorkspaceLimitError` / 线上 `workspace-limit`。`writeFile` 与 `deleteOwned` 共用一条按 Workspace 串行化的链（`writeFile` 在先前操作之后重新检查所有权、重新读取目录树，并拒绝使净增长超过 1 GiB 的写入 / `workspace-quota-exceeded`）。跨 Account 的列出、选择、挂载、写入、删除以及宿主目录浏览把该 id 或路径当作找不到／`directory-picker-unavailable`。
 
 PostgreSQL 是槽位与所有权的真相源。启动时按路径把每一行收养进 `workspaceRegistry`，因此即使 KV 被清空仍能服务 list/create；新的注册表 id 会写回该行。标题更新同时写入两处。会话成员关系仍在注册表实体上。
 

@@ -6,7 +6,7 @@
 
 配置 `url` 为 `postgres://` / `postgresql://` 连接串，或测试用的 `pglite:`。`root` 是存放这些目录树的控制面目录。缺少 `url` 或 `root`、连接失败、或 schema 版本不是 `SCHEMA_VERSION`（1）会在加载时失败。该插件注入 `workspaceRegistry`，因此新建目录同时也是 Host Workspace，Session 挂载路径无需另走一套。
 
-`createEmpty` 分配槽位 0..2；第四次创建抛出 `CloudWorkspaceLimitError`。启动时按路径把每一行 PostgreSQL 记录收养进 `workspaceRegistry`，因此即使 KV 被清空，持久目录仍会出现在列表中。`writeFile` 按 Workspace 串行化、遍历目录树，并拒绝会使总量超过 1 GiB 的写入（`CloudWorkspaceQuotaError`）。`owns` / `listOwned` / `getOwned` / `deleteOwned` 是 Host `/api` 使用的 Account 隔离检查。另一个 Account 的 id 表现为找不到，而不是单独的禁止错误。
+`createEmpty` 分配槽位 0..2；第四次创建抛出 `CloudWorkspaceLimitError`。启动时按路径把每一行 PostgreSQL 记录收养进 `workspaceRegistry`，因此即使 KV 被清空，持久目录仍会出现在列表中。`writeFile` 与 `deleteOwned` 共用一条按 Workspace 串行化的链；`writeFile` 会重新检查所有权、遍历目录树，并拒绝会使总量超过 1 GiB 的写入（`CloudWorkspaceQuotaError`）。`owns` / `listOwned` / `getOwned` / `deleteOwned` 是 Host `/api` 使用的 Account 隔离检查。另一个 Account 的 id 表现为找不到，而不是单独的禁止错误。
 
 git Import 与 E2B 回拷是后续工单；它们必须调用 `writeFile`（或使用同一上限的等价树写入），而不是直接改写持久副本。在 E2B hydrate 成为摄入路径之前，Session cwd 上的本地工具写入也会绕过 `writeFile`。
 

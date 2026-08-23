@@ -197,26 +197,30 @@ export class CloudWorkspaces extends Service {
 
   /**
    * Delete an owned Workspace: PostgreSQL row, registry registration, and durable files.
+   * Waits for in-flight `writeFile` calls on this id, then removes the tree.
    * @param accountId - owning Account.
    * @param workspaceId - Host Workspace id.
    * @returns true when a row was deleted.
    */
   async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean> {
-    const path = await this.ownedPath(accountId, workspaceId)
-    if (path === undefined) return false
-    await this.client().query(
-      'DELETE FROM cloud_workspaces WHERE id = $1 AND account_id = $2',
-      [workspaceId, accountId],
-    )
-    this.owners.delete(workspaceId)
-    this.writeTails.delete(workspaceId)
-    await this.ctx.workspaceRegistry.delete(workspaceId)
-    await rm(path, { recursive: true, force: true })
-    return true
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) return false
+      await this.client().query(
+        'DELETE FROM cloud_workspaces WHERE id = $1 AND account_id = $2',
+        [workspaceId, accountId],
+      )
+      this.owners.delete(workspaceId)
+      await this.ctx.workspaceRegistry.delete(workspaceId)
+      await rm(path, { recursive: true, force: true })
+      return true
+    })
   }
 
   /**
    * Write a file into an owned Workspace, refusing a tree past 1 GiB.
+   * Serialized with other writes and `deleteOwned` for the same id; a delete
+   * that already dropped the row fails as {@link CloudWorkspaceNotFoundError}.
    * @param accountId - owning Account.
    * @param workspaceId - Host Workspace id.
    * @param relativePath - file path inside the Workspace.
@@ -228,12 +232,11 @@ export class CloudWorkspaces extends Service {
     relativePath: string,
     data: Uint8Array,
   ): Promise<void> {
-    const path = await this.ownedPath(accountId, workspaceId)
-    if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
-    const previous = this.writeTails.get(workspaceId) ?? Promise.resolve()
-    const run = previous.then(() => writeWorkspaceFile(path, relativePath, data))
-    this.writeTails.set(workspaceId, run.then(() => undefined, () => undefined))
-    return run
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      await writeWorkspaceFile(path, relativePath, data)
+    })
   }
 
   /**
@@ -247,6 +250,23 @@ export class CloudWorkspaces extends Service {
       'UPDATE cloud_workspaces SET title = $1, updated_at = $2 WHERE id = $3 AND account_id = $4',
       [title, Date.now(), workspaceId, accountId],
     )
+  }
+
+  /**
+   * Run `operation` after every prior write/delete for `workspaceId` has settled.
+   * @param workspaceId - Host Workspace id.
+   * @param operation - write or delete work that re-checks ownership.
+   * @returns the operation result.
+   */
+  private enqueueFileOp<T>(workspaceId: WorkspaceId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeTails.get(workspaceId) ?? Promise.resolve()
+    const run = previous.then(operation)
+    const settled = run.then(() => undefined, () => undefined)
+    this.writeTails.set(workspaceId, settled)
+    void settled.then(() => {
+      if (this.writeTails.get(workspaceId) === settled) this.writeTails.delete(workspaceId)
+    })
+    return run
   }
 
   private async ownedPath(accountId: AccountId, workspaceId: WorkspaceId): Promise<string | undefined> {
