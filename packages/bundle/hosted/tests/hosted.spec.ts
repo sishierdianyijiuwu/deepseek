@@ -38,6 +38,11 @@ describe('dsh-hosted bundle', () => {
     for (const row of rows) {
       expect(manifest.dependencies).toHaveProperty(row.name ?? '')
     }
+    const overrides = (parsed as { id?: string; name?: string }[]).filter(patch => patch.id !== undefined)
+    expect(overrides).toEqual([
+      { id: 'credentials', name: '@deepseek-ai/dsh-credentials-account' },
+    ])
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-credentials-account')
   })
 })
 

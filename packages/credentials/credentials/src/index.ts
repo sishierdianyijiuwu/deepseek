@@ -241,6 +241,18 @@ export abstract class CredentialProvider extends Service {
   abstract listRecords(): Promise<readonly CredentialRecordEntry[]>
 
   /**
+   * Whether any secret is stored for this operation's caller. Hosted
+   * `session.prompt` refuses when this is false so an Account with no
+   * Credential can still sign in. The default answers from {@link listRecords}
+   * only; providers that store references implement the reference half too.
+   * @returns true when a later {@link resolve} or {@link readRecord} would
+   *   observe a stored secret.
+   */
+  hasStoredSecret(): Promise<boolean> {
+    return this.listRecords().then(entries => entries.length > 0)
+  }
+
+  /**
    * Serialized read-modify-write over one record — the only write path.
    * `mutate` sees the record as it stands at the moment the write is
    * exclusive, and returning `undefined` leaves the entry untouched. Exclusion

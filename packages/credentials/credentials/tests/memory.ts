@@ -71,6 +71,13 @@ export class MemoryCredentials extends CredentialProvider {
     return Promise.resolve([...this.records].map(([key, record]) => ({ key, kind: record.kind })))
   }
 
+  override hasStoredSecret(): Promise<boolean> {
+    for (const value of this.store.values()) {
+      if (value.length > 0) return Promise.resolve(true)
+    }
+    return Promise.resolve(this.records.size > 0)
+  }
+
   override async modifyRecord(
     key: CredentialKey,
     mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,

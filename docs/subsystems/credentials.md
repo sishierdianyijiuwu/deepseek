@@ -2,7 +2,7 @@
 
 English | [中文](credentials.zh.md)
 
-The credential seam of [dsh-credentials](../../packages/credentials/credentials) keeps secrets out of configuration: settings sections and `cordis.yml` entries carry *references* (environment-variable names), providers such as [dsh-credentials-local](../../packages/credentials/credentials-local) own the values, and consumers resolve a reference once per operation — the LLM adapters resolve once per model request, so a rotated credential reaches the very next request without any restart. One seam-wide rule binds every provider: an empty stored value is absent everywhere.
+The credential seam of [dsh-credentials](../../packages/credentials/credentials) keeps secrets out of configuration: settings sections and `cordis.yml` entries carry *references* (environment-variable names), providers such as [dsh-credentials-local](../../packages/credentials/credentials-local) (local) and [dsh-credentials-account](../../packages/credentials/credentials-account) (hosted, one document per signed-in Account, no process-environment layer) own the values, and consumers resolve a reference once per operation — the LLM adapters resolve once per model request, so a rotated credential reaches the very next request without any restart. One seam-wide rule binds every provider: an empty stored value is absent everywhere. Hosted `session.prompt` refuses when `hasStoredSecret()` is false so an Account with no Credential can still sign in.
 
 Source: [`packages/credentials/credentials/src/index.ts`](../../packages/credentials/credentials/src/index.ts)
 

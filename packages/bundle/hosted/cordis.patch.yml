@@ -1,7 +1,13 @@
-# The dsh-hosted bundle patch: Account, mailer, auth HTTP, and the register /
-# sign-in / password-reset UI over dsh-base + dsh-web-app. Local `dsh web` does
-# not apply this layer. Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL /
-# DSH_SMTP_HOST / DSH_SMTP_FROM fail loud at load.
+# The dsh-hosted bundle patch: Account, mailer, auth HTTP, Account-scoped
+# Credentials, and the register / sign-in / password-reset UI over dsh-base +
+# dsh-web-app. Local `dsh web` does not apply this layer. Missing
+# DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST / DSH_SMTP_FROM fail
+# loud at load.
+
+# Replace the process-wide home YAML: a hosted Account must not resolve
+# another Account's secret or a platform DEEPSEEK_API_KEY.
+- id: credentials
+  name: '@deepseek-ai/dsh-credentials-account'
 
 - insert:
     - id: mailer

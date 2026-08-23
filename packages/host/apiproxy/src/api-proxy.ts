@@ -2471,6 +2471,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
+        if (isolationActive()) {
+          const credentials = ctx.get('credentials')
+          if (credentials === undefined || !await credentials.hasStoredSecret()) {
+            return err(request, {
+              code: 'credential-missing',
+              message: 'this Account has no model Credential; save one in Settings → Models',
+              details: {},
+            })
+          }
+        }
         const agent = resolved.agent
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {

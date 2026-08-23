@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { credentialRef, isCredentialKeySegment } from '../src/index.ts'
+import { CredentialProvider, credentialKey, credentialRef, isCredentialKeySegment } from '../src/index.ts'
 import type { CredentialRef } from '../src/index.ts'
 import { MemoryCredentials } from './memory.ts'
 
@@ -11,6 +11,26 @@ async function boot(seed: Record<string, string> = {}): Promise<Context> {
   await ctx.plugin(MemoryCredentials, seed)
   return ctx
 }
+
+describe('hasStoredSecret', () => {
+  it('is true when a reference or a record is stored', async () => {
+    const ctx = await boot()
+    expect(await ctx.credentials.hasStoredSecret()).toBe(false)
+    await ctx.credentials.set(REF, 'sk-test')
+    expect(await ctx.credentials.hasStoredSecret()).toBe(true)
+    await ctx.credentials.unset(REF)
+    expect(await ctx.credentials.hasStoredSecret()).toBe(false)
+  })
+
+  it('defaults to listRecords when a provider does not override it', async () => {
+    const ctx = await boot()
+    expect(await CredentialProvider.prototype.hasStoredSecret.call(ctx.credentials)).toBe(false)
+    await ctx.credentials.modifyRecord(credentialKey('llm-pi-ai', 'openai-codex'), () => Promise.resolve({
+      kind: 'api-key' as const,
+    }))
+    expect(await CredentialProvider.prototype.hasStoredSecret.call(ctx.credentials)).toBe(true)
+  })
+})
 
 describe('credentialRef', () => {
   it('brands POSIX shell identifiers', () => {

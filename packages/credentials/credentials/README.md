@@ -36,6 +36,7 @@ const key = credentialKey('llm-pi-ai', 'openai-codex')   // <owner>/<id>, brande
 await ctx.credentials.readRecord(key)                    // CredentialRecord | undefined
 await ctx.credentials.describeRecord(key)                // { configured, kind?, writable } — never the value
 await ctx.credentials.listRecords()                      // [{ key, kind }] — never values
+await ctx.credentials.hasStoredSecret()                  // true when any secret is stored for this caller
 await ctx.credentials.modifyRecord(key, async () => ({ kind: 'grant', payload: { token: '…' } }))
 await ctx.credentials.deleteRecord(key)                  // no-op when absent
 ```
