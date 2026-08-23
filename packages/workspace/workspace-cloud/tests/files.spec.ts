@@ -60,6 +60,7 @@ describe('treeBytes and writeWorkspaceFile', () => {
     expect(await listWorkspaceFiles(dir)).toEqual(['a.txt', 'sub/b.txt', 'sub/c.txt'])
     expect(Buffer.from(await readWorkspaceFile(dir, 'sub/c.txt')).toString()).toBe('x')
     await expect(readWorkspaceFile(dir, 'missing.txt')).rejects.toBeInstanceOf(CloudWorkspacePathError)
+    await expect(readWorkspaceFile(dir, 'link')).rejects.toBeInstanceOf(CloudWorkspacePathError)
   })
 
   it('refuses a write that would pass 1 GiB, including replacement net growth', async () => {

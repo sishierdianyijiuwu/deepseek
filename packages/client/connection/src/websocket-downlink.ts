@@ -4,7 +4,14 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import WebSocket, { WebSocketServer } from 'ws'
-import { currentAccountId, runWithAccount } from '@deepseek-ai/dsh-account'
+import {
+  currentAccountId,
+  currentOperatorAccess,
+  runWithAccount,
+  runWithOperatorAccess,
+  type AccountId,
+  type OperatorAccess,
+} from '@deepseek-ai/dsh-account'
 import type {
   ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -32,6 +39,15 @@ function send(socket: WebSocket, frame: RpcRequest<Frame>): Promise<void> {
       else resolve()
     })
   })
+}
+
+function bindViewer<T>(
+  account: AccountId | undefined,
+  access: OperatorAccess | undefined,
+  fn: () => T,
+): T {
+  if (access !== undefined) return runWithOperatorAccess(access, fn)
+  return runWithAccount(account, fn)
 }
 
 function failureFrame(error: unknown): RpcRequest<Frame> {
@@ -64,7 +80,8 @@ export class WebSocketDownlinks {
    */
   handleMux(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const viewer = currentAccountId()
-    this.upgrade(req, socket, head, signal => runWithAccount(viewer, () => this.api.events.mux({
+    const access = currentOperatorAccess()
+    this.upgrade(req, socket, head, signal => bindViewer(viewer, access, () => this.api.events.mux({
       rpcId: RpcId(randomUUID()),
       payload: {},
     }, signal)))
@@ -78,7 +95,8 @@ export class WebSocketDownlinks {
    */
   handleHost(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const viewer = currentAccountId()
-    this.upgrade(req, socket, head, signal => runWithAccount(viewer, () => this.api.events.host({
+    const access = currentOperatorAccess()
+    this.upgrade(req, socket, head, signal => bindViewer(viewer, access, () => this.api.events.host({
       rpcId: RpcId(randomUUID()),
       payload: {},
     }, signal)))
@@ -106,8 +124,9 @@ export class WebSocketDownlinks {
     open: (signal: AbortSignal) => AsyncIterable<RpcRequest<F>>,
   ): void {
     const viewer = currentAccountId()
+    const access = currentOperatorAccess()
     this.server.handleUpgrade(req, socket, head, (websocket) => {
-      runWithAccount(viewer, () => {
+      bindViewer(viewer, access, () => {
         const abort = new AbortController()
         websocket.once('close', () => { abort.abort() })
         websocket.once('error', () => { abort.abort() })

@@ -23,7 +23,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
-import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
+import { foldRequestHeader, isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
@@ -1960,6 +1960,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     request: RpcRequest<{ sessionId: SessionId }>,
     mutation: (goals: NonNullable<ReturnType<typeof ctx.get<'goals'>>>, agent: Agent) => CoreGoalRef,
   ): Promise<RpcResponse<{ ref: GoalRef }>> {
+    const blocked = refuseOperatorWrite<{ ref: GoalRef }>(request)
+    if (blocked !== undefined) return blocked
     const found = await agentFor(request.payload.sessionId)
     if ('error' in found) return err(request, found.error)
     const goals = goalServiceFor(found.agent)
@@ -2409,6 +2411,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async models(request) {
         const { sessionId } = request.payload
+        if (currentOperatorAccess() !== undefined) {
+          try {
+            const state = await readSessionState(sessionId)
+            await recordOperatorOpening(sessionId)
+            const logged = foldRequestHeader(state.events)?.config
+            const current: ModelSelection = logged === undefined
+              ? defaults.defaultModelSelection()
+              : {
+                provider: logged.provider,
+                model: logged.model,
+                ...logged.reasoningEffort === undefined ? {} : { reasoningEffort: logged.reasoningEffort },
+              }
+            const { groups, failures } = await buildModelCatalog(ctx)
+            return ok(request, {
+              current: { ...current },
+              routable: routeServed(current.provider),
+              groups,
+              failures,
+            })
+          } catch (error: unknown) {
+            if (error instanceof SessionNotFound) {
+              return err(request, {
+                code: 'session-not-found',
+                message: error.message,
+                details: { sessionId },
+              })
+            }
+            throw error
+          }
+        }
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
         const current = selectionFor(found.agent).current
@@ -2792,6 +2824,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         try {
           await requireVisibleHeader(request.payload.parentSessionId)
           const entries = await ctx.subagents.listChildren(request.payload.parentSessionId, signal)
+          await recordOperatorOpening(request.payload.parentSessionId)
           return ok(request, {
             entries: entries.map(entry => entry.kind === 'child'
               ? {
@@ -2905,6 +2938,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         const page = historyPage(ctx, events, beforeSeq, maxMessages)
+        await recordOperatorOpening(childSessionId)
         return ok(request, { ...page, ...projections === undefined ? {} : { projections } })
       },
 
@@ -3451,6 +3485,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async clear(request) {
+        const blocked = refuseOperatorWrite<{ cleared: true }>(request)
+        if (blocked !== undefined) return blocked
         const found = await agentFor(request.payload.sessionId)
         if ('error' in found) return err(request, found.error)
         const goals = goalServiceFor(found.agent)
@@ -3490,6 +3526,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // conversation's history was produced under its preset's tools; the
       // agent and the session survive, only the composition is swapped.
       async select(request) {
+        const blocked = refuseOperatorWrite<{ agentPreset: string }>(request)
+        if (blocked !== undefined) return blocked
         const { sessionId, agentPreset } = request.payload
         const presets = ctx.get('agentPresets')
         if (presets === undefined) {
@@ -3837,237 +3875,250 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const viewer = viewingAccountId()
-        void recordOperatorOpening()
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
-        const subscriber: MuxSubscriber = { queue, viewer }
-        muxSubscribers.add(subscriber)
-        const visibleSessions = () => ctx.sessions.list().filter(session => headerVisibleTo(session.header, viewer))
-        for (const session of visibleSessions()) {
-          subscribeSession(queue, session)
-        }
-        for (const pending of pendingQuestions.values()) {
-          if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
-          queue.push({
-            rpcId: pending.rpcId,
-            payload: {
-              type: 'question/requested', sessionId: pending.sessionId,
-              questions: pending.questions,
-            },
+        const open = (): AsyncIterable<RpcRequest<MuxFrame>> => {
+          const viewer = viewingAccountId()
+          const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+          const subscriber: MuxSubscriber = { queue, viewer }
+          muxSubscribers.add(subscriber)
+          const visibleSessions = () => ctx.sessions.list().filter(session => headerVisibleTo(session.header, viewer))
+          for (const session of visibleSessions()) {
+            subscribeSession(queue, session)
+          }
+          for (const pending of pendingQuestions.values()) {
+            if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
+            queue.push({
+              rpcId: pending.rpcId,
+              payload: {
+                type: 'question/requested', sessionId: pending.sessionId,
+                questions: pending.questions,
+              },
+            })
+          }
+          // Refresh recovery: still-pending approval questions replay with their
+          // stable rpcId so a reconnecting client can still answer them.
+          for (const pending of pendingApprovals.values()) {
+            if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
+            queue.push(requestedFrame(pending))
+          }
+          // Queue snapshot baseline (pendingQuestions precedent): frames replayed
+          // in arrival order per session; a reconnecting client rebuilds its
+          // queue view from these alone.
+          for (const session of visibleSessions()) {
+            const agent = ctx.agents.get(session.id)
+            if (agent?.session === session && agent.inbox.hasPending) {
+              queue.push(frame({ type: 'session/queue', sessionId: session.id, items: queueItems(agent) }))
+            }
+          }
+          // Background-task baseline. `ctx.agents.get` is the non-resuming read:
+          // a session with no live Agent owns no tasks, so it correctly sees only
+          // the unowned ones, and listing never revives a cold session. An empty
+          // set sends nothing — absence is how the client reads "no tasks".
+          const jobs = ctx.get('jobs')
+          if (jobs !== undefined) {
+            for (const session of visibleSessions()) {
+              const views = jobViews(jobs.list(ctx.agents.get(session.id)))
+              if (views.length > 0) {
+                queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
+              }
+            }
+          }
+          // Per-session open-call table for result-view pairing. Bounded by the
+          // per-turn call count: entries clear on turn/end; a table miss (stream
+          // opened mid-turn) backscans the session's in-memory events instead.
+          const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+          const disposers = [
+            ctx.on('session/event', (session: Session, event: SessionEvent) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              if (event.type === 'tool/call') {
+                const data = event.data as ToolCallData
+                try {
+                  let table = openCalls.get(session.id)
+                  if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
+                  table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
+                } catch {
+                // Unparseable model arguments: leave the table unset; the result view soft-falls.
+                }
+              } else if (event.type === 'turn/end') {
+                openCalls.delete(session.id)
+              }
+              const view = viewFor(
+                ctx, event,
+                callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
+                ctx.agents.get(session.id),
+              )
+              queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
+            }),
+            ctx.on('session/created', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              subscribeSession(queue, session)
+              // The subscribe frame clears the client's task mirror, and a
+              // session born after the stream opened missed the baseline loop.
+              // Unowned tasks are visible to it from birth, so without this it
+              // would show none until the next registry change.
+              const views = jobs === undefined ? [] : jobViews(jobs.list(ctx.agents.get(session.id)))
+              if (views.length > 0) {
+                queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
+              }
+            }),
+            ctx.on('session/disposed', (session: Session) => {
+              openCalls.delete(session.id)
+            }),
+            ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
+              if (owner !== undefined) {
+                if (!headerVisibleTo(owner.session.header, viewer)) return
+                // The exact owner instance the fence compares against, so the
+                // push stays correct even while that Agent's scope is tearing
+                // down and a lookup by id would already miss.
+                queue.push(frame({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) }))
+                return
+              }
+              // An unowned task is visible to every caller, so every subscribed
+              // session's set changed with it.
+              for (const session of visibleSessions()) {
+                queue.push(frame({
+                  type: 'session/jobs',
+                  sessionId: session.id,
+                  jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
+                }))
+              }
+            })],
+          ]
+          return queue.iterate(signal, () => {
+            muxSubscribers.delete(subscriber)
+            for (const dispose of disposers) dispose()
           })
         }
-        // Refresh recovery: still-pending approval questions replay with their
-        // stable rpcId so a reconnecting client can still answer them.
-        for (const pending of pendingApprovals.values()) {
-          if (!visibleSessionIdTo(pending.sessionId, viewer)) continue
-          queue.push(requestedFrame(pending))
-        }
-        // Queue snapshot baseline (pendingQuestions precedent): frames replayed
-        // in arrival order per session; a reconnecting client rebuilds its
-        // queue view from these alone.
-        for (const session of visibleSessions()) {
-          const agent = ctx.agents.get(session.id)
-          if (agent?.session === session && agent.inbox.hasPending) {
-            queue.push(frame({ type: 'session/queue', sessionId: session.id, items: queueItems(agent) }))
-          }
-        }
-        // Background-task baseline. `ctx.agents.get` is the non-resuming read:
-        // a session with no live Agent owns no tasks, so it correctly sees only
-        // the unowned ones, and listing never revives a cold session. An empty
-        // set sends nothing — absence is how the client reads "no tasks".
-        const jobs = ctx.get('jobs')
-        if (jobs !== undefined) {
-          for (const session of visibleSessions()) {
-            const views = jobViews(jobs.list(ctx.agents.get(session.id)))
-            if (views.length > 0) {
-              queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
-            }
-          }
-        }
-        // Per-session open-call table for result-view pairing. Bounded by the
-        // per-turn call count: entries clear on turn/end; a table miss (stream
-        // opened mid-turn) backscans the session's in-memory events instead.
-        const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
-        const disposers = [
-          ctx.on('session/event', (session: Session, event: SessionEvent) => {
-            if (!headerVisibleTo(session.header, viewer)) return
-            if (event.type === 'tool/call') {
-              const data = event.data as ToolCallData
-              try {
-                let table = openCalls.get(session.id)
-                if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
-                table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
-              } catch {
-                // Unparseable model arguments: leave the table unset; the result view soft-falls.
-              }
-            } else if (event.type === 'turn/end') {
-              openCalls.delete(session.id)
-            }
-            const view = viewFor(
-              ctx, event,
-              callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
-              ctx.agents.get(session.id),
-            )
-            queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
-          }),
-          ctx.on('session/created', (session: Session) => {
-            if (!headerVisibleTo(session.header, viewer)) return
-            subscribeSession(queue, session)
-            // The subscribe frame clears the client's task mirror, and a
-            // session born after the stream opened missed the baseline loop.
-            // Unowned tasks are visible to it from birth, so without this it
-            // would show none until the next registry change.
-            const views = jobs === undefined ? [] : jobViews(jobs.list(ctx.agents.get(session.id)))
-            if (views.length > 0) {
-              queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
-            }
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            openCalls.delete(session.id)
-          }),
-          ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
-            if (owner !== undefined) {
-              if (!headerVisibleTo(owner.session.header, viewer)) return
-              // The exact owner instance the fence compares against, so the
-              // push stays correct even while that Agent's scope is tearing
-              // down and a lookup by id would already miss.
-              queue.push(frame({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) }))
-              return
-            }
-            // An unowned task is visible to every caller, so every subscribed
-            // session's set changed with it.
-            for (const session of visibleSessions()) {
-              queue.push(frame({
-                type: 'session/jobs',
-                sessionId: session.id,
-                jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
-              }))
-            }
-          })],
-        ]
-        return queue.iterate(signal, () => {
-          muxSubscribers.delete(subscriber)
-          for (const dispose of disposers) dispose()
-        })
+        if (currentOperatorAccess() === undefined) return open()
+        return (async function* () {
+          await recordOperatorOpening()
+          yield* open()
+        })()
       },
 
       host(_request, signal) {
-        const viewer = viewingAccountId()
-        const queue = new FrameQueue<RpcRequest<HostFrame>>()
-        const cloud = ctx.get('cloudWorkspaces')
-        const committedWorkspaces = workspaceRegistry().list()
-          .filter(workspace => cloud === undefined || (viewer !== undefined && cloud.owns(viewer, workspace.id)))
-        const committedWorkspaceIds = new Set(
-          committedWorkspaces.map(workspace => String(workspace.id)),
-        )
-        let committedWorkspaceOrder = committedWorkspaces.map(workspace => workspace.id)
-        // Frame-dedup baseline, same posture as committedWorkspaceIds: the
-        // stream opens against the current set; workspace.list re-baselines
-        // reconnecting clients, so only later changes need frames.
-        let archivedSessionIds = visibleArchivedSessionIds(viewer)
-        const disposers = [
-          ctx.on('session/created', (session: Session) => {
-            if (!headerVisibleTo(session.header, viewer)) return
-            queue.push(frame({
-              type: 'host/session-added',
-              sessionId: session.id,
-              // Derived at frame time like summarize(); a just-created session
-              // has run no turn yet, so this is constantly true in practice.
-              blank: sessionBlank(session),
-              // Including cwd lets the client group the new session without refreshing the list.
-              ...sessionListFields(session.header, session.events),
-            }))
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            if (!headerVisibleTo(session.header, viewer)) return
-            queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
-          }),
-          ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
-            if (!headerVisibleTo(agent.session.header, viewer)) return
-            queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
-          }),
-          ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
-            if (!headerVisibleTo(agent.session.header, viewer)) return
-            queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
-          }),
-          ctx.on('domain/changed', (change) => {
-            if (change.domain !== 'workspace') return
-            if (change.table === '') {
-              if (change.operation !== 'put') return
-              const state = workspaceDomainState.parse(change.value)
-              for (const workspaceId of state.workspaceIds) {
-                if (committedWorkspaceIds.has(workspaceId)) continue
-                const workspace = workspaceRegistry().get(workspaceId)
-                if (workspace === undefined) {
-                  throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
-                }
-                if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, workspace.id))) continue
-                committedWorkspaceIds.add(workspaceId)
-                queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
-              }
-              const visibleOrder = cloud === undefined || viewer === undefined
-                ? [...state.workspaceIds]
-                : state.workspaceIds.filter(id => cloud.owns(viewer, id))
-              const orderChanged = visibleOrder.length === committedWorkspaceOrder.length
-                && visibleOrder.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
-                && visibleOrder.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
-              committedWorkspaceOrder = visibleOrder
-              if (orderChanged) {
-                queue.push(frame({
-                  type: 'host/workspace-order-changed',
-                  workspaceIds: [...visibleOrder],
-                }))
-              }
-              const nextArchived = filterArchivedSessionIds(state.archivedSessionIds, viewer)
-              if (nextArchived.length !== archivedSessionIds.length
-                || nextArchived.some((id, index) => id !== archivedSessionIds[index])) {
-                archivedSessionIds = nextArchived
-                queue.push(frame({
-                  type: 'host/archived-sessions-changed',
-                  archivedSessionIds: [...nextArchived],
-                }))
-              }
-              return
-            }
-            if (change.table !== 'workspaces') return
-            if (change.operation === 'deleted') {
-              if (!committedWorkspaceIds.delete(change.key)) return
+        const open = (): AsyncIterable<RpcRequest<HostFrame>> => {
+          const viewer = viewingAccountId()
+          const queue = new FrameQueue<RpcRequest<HostFrame>>()
+          const cloud = ctx.get('cloudWorkspaces')
+          const committedWorkspaces = workspaceRegistry().list()
+            .filter(workspace => cloud === undefined || (viewer !== undefined && cloud.owns(viewer, workspace.id)))
+          const committedWorkspaceIds = new Set(
+            committedWorkspaces.map(workspace => String(workspace.id)),
+          )
+          let committedWorkspaceOrder = committedWorkspaces.map(workspace => workspace.id)
+          // Frame-dedup baseline, same posture as committedWorkspaceIds: the
+          // stream opens against the current set; workspace.list re-baselines
+          // reconnecting clients, so only later changes need frames.
+          let archivedSessionIds = visibleArchivedSessionIds(viewer)
+          const disposers = [
+            ctx.on('session/created', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
               queue.push(frame({
-                type: 'host/workspace-removed',
-                workspaceId: change.key as WorkspaceId,
-              }))
-              return
-            }
-            if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, brandWorkspaceId(change.key)))) {
-              return
-            }
-            if (!committedWorkspaceIds.has(change.key)) return
-            // Existing-entity table writes are complete attach/touch commits.
-            // A new entity's first put waits for the global registry write above.
-            queue.push(frame({
-              type: 'host/workspace-changed',
-              workspace: changedWorkspaceView(change.key, change.value),
-            }))
-          }),
-          // Allowlisted host events ride one verbatim wrapper frame each. The
-          // allowlist is api-remotes', and `ctx.remote.$on` is the consumer
-          // face; nothing here projects, redacts, or renames.
-          ...API_REMOTE_FORWARDED_EVENTS.map(name => ctx.on(
-            name,
-            // The allowlist's shape assertion proves each name is a real,
-            // non-scoped, void-returning event, so the rest-parameter handler
-            // satisfies every member of the union `on` accepts here;
-            // assertJsonArgs proves the payload is JSON-safe before it queues.
-            ((...args: unknown[]) => {
-              queue.push(frame({
-                type: 'host/remote-event',
-                event: name,
-                args: assertJsonArgs(name, args),
+                type: 'host/session-added',
+                sessionId: session.id,
+                // Derived at frame time like summarize(); a just-created session
+                // has run no turn yet, so this is constantly true in practice.
+                blank: sessionBlank(session),
+                // Including cwd lets the client group the new session without refreshing the list.
+                ...sessionListFields(session.header, session.events),
               }))
             }),
-          )),
-        ]
-        return queue.iterate(signal, () => { for (const dispose of disposers) dispose() })
+            ctx.on('session/disposed', (session: Session) => {
+              if (!headerVisibleTo(session.header, viewer)) return
+              queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+            }),
+            ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
+              if (!headerVisibleTo(agent.session.header, viewer)) return
+              queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
+            }),
+            ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
+              if (!headerVisibleTo(agent.session.header, viewer)) return
+              queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
+            }),
+            ctx.on('domain/changed', (change) => {
+              if (change.domain !== 'workspace') return
+              if (change.table === '') {
+                if (change.operation !== 'put') return
+                const state = workspaceDomainState.parse(change.value)
+                for (const workspaceId of state.workspaceIds) {
+                  if (committedWorkspaceIds.has(workspaceId)) continue
+                  const workspace = workspaceRegistry().get(workspaceId)
+                  if (workspace === undefined) {
+                    throw new Error(`committed workspace registry references missing workspace "${workspaceId}"`)
+                  }
+                  if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, workspace.id))) continue
+                  committedWorkspaceIds.add(workspaceId)
+                  queue.push(frame({ type: 'host/workspace-changed', workspace: workspaceView(workspace) }))
+                }
+                const visibleOrder = cloud === undefined || viewer === undefined
+                  ? [...state.workspaceIds]
+                  : state.workspaceIds.filter(id => cloud.owns(viewer, id))
+                const orderChanged = visibleOrder.length === committedWorkspaceOrder.length
+                && visibleOrder.every(workspaceId => committedWorkspaceIds.has(String(workspaceId)))
+                && visibleOrder.some((workspaceId, index) => workspaceId !== committedWorkspaceOrder[index])
+                committedWorkspaceOrder = visibleOrder
+                if (orderChanged) {
+                  queue.push(frame({
+                    type: 'host/workspace-order-changed',
+                    workspaceIds: [...visibleOrder],
+                  }))
+                }
+                const nextArchived = filterArchivedSessionIds(state.archivedSessionIds, viewer)
+                if (nextArchived.length !== archivedSessionIds.length
+                || nextArchived.some((id, index) => id !== archivedSessionIds[index])) {
+                  archivedSessionIds = nextArchived
+                  queue.push(frame({
+                    type: 'host/archived-sessions-changed',
+                    archivedSessionIds: [...nextArchived],
+                  }))
+                }
+                return
+              }
+              if (change.table !== 'workspaces') return
+              if (change.operation === 'deleted') {
+                if (!committedWorkspaceIds.delete(change.key)) return
+                queue.push(frame({
+                  type: 'host/workspace-removed',
+                  workspaceId: change.key as WorkspaceId,
+                }))
+                return
+              }
+              if (cloud !== undefined && (viewer === undefined || !cloud.owns(viewer, brandWorkspaceId(change.key)))) {
+                return
+              }
+              if (!committedWorkspaceIds.has(change.key)) return
+              // Existing-entity table writes are complete attach/touch commits.
+              // A new entity's first put waits for the global registry write above.
+              queue.push(frame({
+                type: 'host/workspace-changed',
+                workspace: changedWorkspaceView(change.key, change.value),
+              }))
+            }),
+            // Allowlisted host events ride one verbatim wrapper frame each. The
+            // allowlist is api-remotes', and `ctx.remote.$on` is the consumer
+            // face; nothing here projects, redacts, or renames.
+            ...API_REMOTE_FORWARDED_EVENTS.map(name => ctx.on(
+              name,
+              // The allowlist's shape assertion proves each name is a real,
+              // non-scoped, void-returning event, so the rest-parameter handler
+              // satisfies every member of the union `on` accepts here;
+              // assertJsonArgs proves the payload is JSON-safe before it queues.
+              ((...args: unknown[]) => {
+                queue.push(frame({
+                  type: 'host/remote-event',
+                  event: name,
+                  args: assertJsonArgs(name, args),
+                }))
+              }),
+            )),
+          ]
+          return queue.iterate(signal, () => { for (const dispose of disposers) dispose() })
+        }
+        if (currentOperatorAccess() === undefined) return open()
+        return (async function* () {
+          await recordOperatorOpening()
+          yield* open()
+        })()
       },
     },
 
@@ -4075,9 +4126,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async sessionLog(request, signal) {
         // A live Session the caller cannot see 404s before flush or `readRaw`.
         const attached = ctx.sessions.get(request.sessionId)
-        if (attached !== undefined && headerVisible(attached.header)) {
-          await recordOperatorOpening(request.sessionId)
-        }
         if (attached !== undefined && !headerVisible(attached.header)) {
           return new Response('session not found', { status: 404 })
         }
@@ -4117,6 +4165,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             return new Response('session log export failed to prepare the stored artifact', { status: 500 })
           }
         }
+        await recordOperatorOpening(request.sessionId)
         let root: SessionRawArtifact | undefined
         try {
           await flushLiveSessionLog(deps, request.sessionId, signal)

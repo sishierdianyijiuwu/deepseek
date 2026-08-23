@@ -19,7 +19,7 @@ import PostgresAccounts from '@deepseek-ai/dsh-account-postgres'
 import { OPERATOR_ACCESS_HEADER } from '@deepseek-ai/dsh-account'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import SessionStore from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
@@ -80,6 +80,19 @@ class IsolatedApiProxy extends Service {
     ctx.storage.mount('domain', storageDomain)
     ctx.provide('storageDomain', storageDomain)
     ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+    ctx.provide('subagents', {
+      listChildren: (parentId: string) => Promise.resolve(
+        ctx.sessions.list()
+          .filter(session => session.header.parentSession === parentId)
+          .map(session => ({
+            kind: 'child' as const,
+            id: session.id,
+            mode: 'one-shot' as const,
+            hasChildren: false,
+            activity: 'inactive' as const,
+          })),
+      ),
+    } as never)
     ctx.agents.setFactory({
       createAgent: async (ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> => {
         const session = ctx.sessions.create(options.sessionId, {
@@ -265,8 +278,9 @@ function jsonBody(response: Response): Promise<unknown> {
   return response.json() as Promise<unknown>
 }
 
-function openMux(
+function openStream(
   harness: Harness,
+  path: '/api/events.mux' | '/api/events.host',
   jar: CookieJar | undefined,
   extraHeaders: Record<string, string> = {},
 ): {
@@ -276,7 +290,7 @@ function openMux(
   closed: Promise<number | undefined>
 } {
   const frames: string[] = []
-  const socket = new WebSocket(`ws://127.0.0.1:${String(harness.port)}/api/events.mux`, {
+  const socket = new WebSocket(`ws://127.0.0.1:${String(harness.port)}${path}`, {
     headers: {
       ...jar === undefined ? {} : { cookie: jar.header() },
       origin: `http://127.0.0.1:${String(harness.port)}`,
@@ -358,6 +372,12 @@ describe('Operator read-only access over HTTP', () => {
       result?: { ok?: boolean }
     }).toMatchObject({ result: { ok: true } })
 
+    expect(rpcError((await rpc(harness, operatorJar, 'goal.create', {
+      sessionId, objective: 'inspect',
+    }, header)).body)).toBe('operator-access-readonly')
+    expect(rpcError((await rpc(harness, operatorJar, 'agentPreset.select', {
+      sessionId, agentPreset: 'default',
+    }, header)).body)).toBe('operator-access-readonly')
     expect(rpcError((await rpc(harness, operatorJar, 'session.prompt', {
       sessionId, mode: 'queue', content: [{ type: 'text', text: 'hi' }],
     }, header)).body)).toBe('operator-access-readonly')
@@ -380,11 +400,33 @@ describe('Operator read-only access over HTTP', () => {
     expect((readFile.body as { result?: { value?: { data?: string } } }).result?.value?.data)
       .toBe('secret-note')
 
-    const mux = openMux(harness, operatorJar, header)
-    await mux.opened
-    mux.socket.send('{"type":"client-request"}')
-    expect(await mux.closed).toBe(1008)
-    mux.socket.close()
+    const muxOp = openStream(harness, '/api/events.mux', operatorJar, header)
+    const muxOther = openStream(harness, '/api/events.mux', otherJar)
+    const hostOp = openStream(harness, '/api/events.host', operatorJar, header)
+    await Promise.all([muxOp.opened, muxOther.opened, hostOp.opened])
+    await expect.poll(() => muxOp.frames.join('\n').includes(sessionId!), { timeout: 5_000 }).toBe(true)
+    expect(muxOther.frames.join('\n')).not.toContain(sessionId)
+    muxOp.socket.send('{"type":"client-request"}')
+    expect(await muxOp.closed).toBe(1008)
+    muxOther.socket.close()
+    hostOp.socket.close()
+
+    const childId = SessionId('op-child')
+    const parent = context!.sessions.get(sessionId as never)
+    expect(parent?.header.owner).toEqual(expect.any(String))
+    context!.sessions.create(childId, {
+      meta: {
+        cwd: root!,
+        owner: parent!.header.owner!,
+        origin: 'subagent',
+        parentSession: sessionId as never,
+      },
+    })
+    expect((await rpc(harness, operatorJar, 'subagent.history', {
+      parentSessionId: sessionId,
+      childSessionId: childId,
+      mode: 'one-shot',
+    }, header)).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
 
     await rpc(harness, operatorJar, 'session.history', { sessionId }, header)
     const audit = await jsonBody(await raw(harness, operatorJar, '/auth/operator/audit')) as {
@@ -408,6 +450,6 @@ describe('Operator read-only access over HTTP', () => {
       harness, operatorJar, `/auth/operator/account?email=${encodeURIComponent(target)}`,
     ))).toMatchObject({ ok: true, banned: true, verified: true })
     expect(sessionIds((await rpc(harness, operatorJar, 'session.list', {}, header)).body))
-      .toEqual([sessionId])
+      .toEqual(expect.arrayContaining([sessionId]))
   })
 })

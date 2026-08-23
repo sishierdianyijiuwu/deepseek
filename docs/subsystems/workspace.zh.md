@@ -133,6 +133,92 @@ interface Workspace {
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxcloudworkspaces--cloudworkspaces"></a>
+
+### `ctx.cloudWorkspaces` — `CloudWorkspaces`
+
+Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.
+
+```ts cordis-catalog
+/**
+ * Whether `workspaceId` is a cloud Workspace owned by `accountId`.
+ * @param accountId - signed-in Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns true when the in-memory ownership map agrees.
+ */
+owns(accountId: AccountId, workspaceId: WorkspaceId): boolean
+
+/**
+ * Create an empty Workspace directory for `accountId`.
+ * @param accountId - owning Account.
+ * @param title - display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.
+ * @returns the registry Workspace after the PG row and directory exist.
+ */
+async createEmpty(accountId: AccountId, title?: string): Promise<Workspace>
+
+/**
+ * Registry Workspaces this Account owns, in durable registry order.
+ * @param accountId - owning Account.
+ * @returns owned Workspaces that still exist in the registry.
+ */
+listOwned(accountId: AccountId): Workspace[]
+
+/**
+ * Look up one owned Workspace.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns the registry Workspace, or `undefined` when missing or not owned.
+ */
+getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined
+
+/**
+ * Delete an owned Workspace: PostgreSQL row, registry registration, and durable files.
+ * Waits for in-flight `writeFile` calls on this id, then removes the tree.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns true when a row was deleted.
+ */
+async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean>
+
+/**
+ * Write a file into an owned Workspace, refusing a tree past 1 GiB.
+ * Serialized with other writes and `deleteOwned` for the same id; a delete
+ * that already dropped the row fails as {@link CloudWorkspaceNotFoundError}.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param relativePath - file path inside the Workspace.
+ * @param data - bytes to write.
+ */
+async writeFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, data: Uint8Array, ): Promise<void>
+
+/**
+ * List regular files in an owned Workspace as POSIX-relative paths.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @returns sorted relative paths.
+ */
+async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]>
+
+/**
+ * Read one contained file from an owned Workspace.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param relativePath - file path inside the Workspace.
+ * @returns file bytes.
+ */
+async readFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, ): Promise<Uint8Array>
+
+/**
+ * Persist a new display title on the PostgreSQL row after the registry write.
+ * @param accountId - owning Account.
+ * @param workspaceId - Host Workspace id.
+ * @param title - new title.
+ */
+async setOwnedTitle(accountId: AccountId, workspaceId: WorkspaceId, title: string): Promise<void>
+```
+
+Source: [`packages/workspace/workspace-cloud/src/index.ts`](../../packages/workspace/workspace-cloud/src/index.ts)
+
 <a id="ctxdirectorypicker--directorypicker-abstract-seam"></a>
 
 ### `ctx.directoryPicker` — `DirectoryPicker` (abstract seam)

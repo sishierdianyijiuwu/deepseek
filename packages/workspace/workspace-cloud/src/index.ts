@@ -250,9 +250,11 @@ export class CloudWorkspaces extends Service {
    * @returns sorted relative paths.
    */
   async listFiles(accountId: AccountId, workspaceId: WorkspaceId): Promise<string[]> {
-    const path = await this.ownedPath(accountId, workspaceId)
-    if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
-    return listWorkspaceFiles(path)
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      return listWorkspaceFiles(path)
+    })
   }
 
   /**
@@ -267,9 +269,11 @@ export class CloudWorkspaces extends Service {
     workspaceId: WorkspaceId,
     relativePath: string,
   ): Promise<Uint8Array> {
-    const path = await this.ownedPath(accountId, workspaceId)
-    if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
-    return readWorkspaceFile(path, relativePath)
+    return this.enqueueFileOp(workspaceId, async () => {
+      const path = await this.ownedPath(accountId, workspaceId)
+      if (path === undefined) throw new CloudWorkspaceNotFoundError(workspaceId)
+      return readWorkspaceFile(path, relativePath)
+    })
   }
 
   /**

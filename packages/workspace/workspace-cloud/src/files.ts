@@ -133,14 +133,17 @@ export async function listWorkspaceFiles(root: string): Promise<string[]> {
  */
 export async function readWorkspaceFile(root: string, relativePath: string): Promise<Uint8Array> {
   const full = resolveWorkspaceFile(root, relativePath)
+  let info
   try {
-    return await readFile(full)
+    info = await lstat(full)
   } catch (error: unknown) {
-    if ((error as { code?: string }).code === 'ENOENT' || (error as { code?: string }).code === 'EISDIR') {
+    if ((error as { code?: string }).code === 'ENOENT') {
       throw new CloudWorkspacePathError(relativePath)
     }
     throw error
   }
+  if (!info.isFile()) throw new CloudWorkspacePathError(relativePath)
+  return readFile(full)
 }
 
 async function collectWorkspaceFiles(dir: string, prefix: string, out: string[]): Promise<void> {

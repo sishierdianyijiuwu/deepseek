@@ -31,6 +31,7 @@ import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 const sid = (id: string): SessionId => id as SessionId
 const accountA = accountId('account-a')
 const accountB = accountId('account-b')
+const auditLog: OperatorAuditWrite[] = []
 
 let nextRpc = 1
 function request<P>(payload: P): RpcRequest<P> {
@@ -81,14 +82,16 @@ class FakeAccounts extends Accounts {
     return Promise.resolve(undefined)
   }
   override recordOperatorAccess(entry: OperatorAuditWrite): Promise<OperatorAuditRecord> {
-    return Promise.resolve({ id: 'audit-1', ...entry })
+    auditLog.push(entry)
+    return Promise.resolve({ id: `audit-${String(auditLog.length)}`, ...entry })
   }
   override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
-    return Promise.resolve([])
+    return Promise.resolve(auditLog.map((entry, index) => ({ id: `audit-${String(index + 1)}`, ...entry })))
   }
 }
 
 async function harness(): Promise<{ ctx: Context; api: ApiProxy }> {
+  auditLog.length = 0
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(UserQuestionService)
@@ -221,7 +224,7 @@ describe('Account-owned Sessions', () => {
   })
 
   it('lets Operator access read another Account and refuses prompt', async () => {
-    const { api } = await harness()
+    const { ctx, api } = await harness()
     const created = await runWithAccount(accountA, () => api.sessions.create(request({})))
     expect(created.result.ok).toBe(true)
     if (!created.result.ok) throw new Error('create failed')
@@ -262,5 +265,59 @@ describe('Account-owned Sessions', () => {
       result: { ok: true, value: {} },
     }))
     expect(respond).toEqual({ accepted: false, reason: 'not-pending' })
+
+    expect(rpcError((await runWithOperatorAccess(access, () => api.goals.create(request({
+      sessionId,
+      objective: 'inspect',
+    })))).result)).toBe('operator-access-readonly')
+    expect(rpcError((await runWithOperatorAccess(access, () => api.agentPresets.select(request({
+      sessionId,
+      agentPreset: 'default',
+    })))).result)).toBe('operator-access-readonly')
+
+    const childId = sid('op-child')
+    ctx.sessions.create(childId, {
+      meta: { cwd: '/tmp', owner: accountA, origin: 'subagent', parentSession: sessionId },
+    })
+    ctx.provide('subagents', {
+      listChildren: () => Promise.resolve([{
+        kind: 'child',
+        id: childId,
+        mode: 'one-shot',
+        hasChildren: false,
+        activity: 'inactive',
+      }]),
+    } as never)
+    const subHistory = await runWithOperatorAccess(access, () => api.subagents.history(request({
+      parentSessionId: sessionId,
+      childSessionId: childId,
+      mode: 'one-shot' as const,
+    }), new AbortController().signal))
+    expect(subHistory.result.ok).toBe(true)
+    expect(auditLog.some(entry => entry.sessionId === childId)).toBe(true)
+
+    const coldId = sid('cold-export')
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([{ id: coldId, owner: accountA, cwd: '/tmp', createdAt: 1, version: 0 }]),
+      supportsRawArtifacts: true,
+      readRaw: () => Promise.resolve({
+        meta: { id: coldId, owner: accountA, cwd: '/tmp', createdAt: 1, version: 0 },
+        filename: 'session.jsonl',
+        content: '{}\n',
+      }),
+    } as never)
+    ctx.provide('sessionQuery', {
+      traceSession: () => Promise.resolve({ ancestors: [], descendants: [] }),
+    } as never)
+    ctx.provide('attachments', {} as never)
+    await runWithOperatorAccess(access, () => api.downloads.sessionLog(
+      { sessionId: coldId },
+      new AbortController().signal,
+    ))
+    expect(auditLog.some(entry => entry.sessionId === coldId)).toBe(true)
   })
 })
+
+function rpcError(result: { ok?: boolean; error?: { code: string } } | undefined): string | undefined {
+  return result?.error?.code
+}
