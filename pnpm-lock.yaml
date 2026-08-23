@@ -834,9 +834,21 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: workspace:^
         version: link:../../core/session
+      '@deepseek-ai/dsh-storage':
+        specifier: workspace:^
+        version: link:../../storage/storage
+      '@deepseek-ai/dsh-storage-domain':
+        specifier: workspace:^
+        version: link:../../storage/storage-domain
       '@deepseek-ai/dsh-user-questions':
         specifier: workspace:^
         version: link:../../interaction/user-questions
+      '@deepseek-ai/dsh-workspace':
+        specifier: workspace:^
+        version: link:../../workspace/workspace
+      '@deepseek-ai/dsh-workspace-cloud':
+        specifier: workspace:^
+        version: link:../../workspace/workspace-cloud
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
@@ -1410,6 +1422,9 @@ importers:
       '@deepseek-ai/dsh-mailer-smtp':
         specifier: workspace:^
         version: link:../../account/mailer-smtp
+      '@deepseek-ai/dsh-workspace-cloud':
+        specifier: workspace:^
+        version: link:../../workspace/workspace-cloud
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -5304,6 +5319,9 @@ importers:
       '@deepseek-ai/dsh-workspace':
         specifier: workspace:^
         version: link:../../workspace/workspace
+      '@deepseek-ai/dsh-workspace-cloud':
+        specifier: workspace:^
+        version: link:../../workspace/workspace-cloud
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
@@ -8941,6 +8959,34 @@ importers:
       '@deepseek-ai/dsh-storage-domain':
         specifier: workspace:^
         version: link:../../storage/storage-domain
+
+  packages/workspace/workspace-cloud:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-account':
+        specifier: workspace:^
+        version: link:../../account/account
+      '@deepseek-ai/dsh-account-postgres':
+        specifier: workspace:^
+        version: link:../../account/account-postgres
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-storage':
+        specifier: workspace:^
+        version: link:../../storage/storage
+      '@deepseek-ai/dsh-storage-domain':
+        specifier: workspace:^
+        version: link:../../storage/storage-domain
+      '@deepseek-ai/dsh-workspace':
+        specifier: workspace:^
+        version: link:../workspace
 
   python/sdk-runtime:
     dependencies:

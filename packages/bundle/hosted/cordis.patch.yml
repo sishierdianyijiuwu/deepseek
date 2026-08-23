@@ -1,8 +1,8 @@
 # The dsh-hosted bundle patch: Account, mailer, auth HTTP, Account-scoped
-# Credentials, and the register / sign-in / password-reset UI over dsh-base +
-# dsh-web-app. Local `dsh web` does not apply this layer. Missing
-# DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST / DSH_SMTP_FROM fail
-# loud at load.
+# Credentials, cloud Workspaces, and the register / sign-in / password-reset
+# UI over dsh-base + dsh-web-app. Local `dsh web` does not apply this layer.
+# Missing DSH_POSTGRES_URL / DSH_PUBLIC_BASE_URL / DSH_SMTP_HOST /
+# DSH_SMTP_FROM / DSH_WORKSPACE_ROOT fail loud at load.
 
 # Replace the process-wide home YAML: a hosted Account must not resolve
 # another Account's secret or a platform DEEPSEEK_API_KEY.
@@ -27,6 +27,12 @@
         publicBaseUrl: !!js process.env.DSH_PUBLIC_BASE_URL
         operatorEmails: !!js (process.env.DSH_OPERATOR_EMAILS ?? '').split(',').map(s => s.trim()).filter(Boolean)
 
+    - id: cloud-workspaces
+      name: '@deepseek-ai/dsh-workspace-cloud'
+      config:
+        url: !!js process.env.DSH_POSTGRES_URL
+        root: !!js process.env.DSH_WORKSPACE_ROOT
+
     - id: account-http
       name: '@deepseek-ai/dsh-account-http'
       config:
@@ -34,3 +40,9 @@
 
     - id: ui-account
       name: '@deepseek-ai/dsh-client-ui-account'
+
+# Hosted Workspaces are cloud directories, not host folders. Disable the
+# web-app native/browse picker so host.listDirectory cannot walk another
+# Account's tree.
+- id: directory-picker
+  disabled: true

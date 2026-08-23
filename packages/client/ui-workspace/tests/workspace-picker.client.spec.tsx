@@ -30,8 +30,8 @@ function hook<T>(snapshot: T) {
 const sessions: SessionListState = {
   ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
 }
-const workspaceState = (items: readonly WorkspaceView[]): WorkspaceListState => ({
-  items, archivedSessionIds: [], state: 'idle', phase: 'ready', error: null, baselinesReady: true,
+const workspaceState = (items: readonly WorkspaceView[], emptyCreate = false): WorkspaceListState => ({
+  items, archivedSessionIds: [], emptyCreate, state: 'idle', phase: 'ready', error: null, baselinesReady: true,
   recentWorkspaceId: items[0]?.workspaceId,
 })
 function anchor(): { current: HTMLElement } {
@@ -81,6 +81,7 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
+  emptyCreate = false,
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
@@ -91,7 +92,7 @@ function mount(
       open
       anchorRef={anchorRef}
       useSessions={hook(sessions)}
-      useWorkspaces={hook(workspaceState(nextItems))}
+      useWorkspaces={hook(workspaceState(nextItems, emptyCreate))}
       onPick={onPick}
       onClose={onClose}
       createWorkspace={createWorkspace}
@@ -134,6 +135,33 @@ describe('WorkspacePicker', () => {
     expect(createWorkspace).toHaveBeenCalledWith({ path: '/tmp/project' })
     await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
     // Successful adoption withdraws the flow request.
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+  })
+
+  it('creates an empty cloud Workspace without opening the directory flow', async () => {
+    const created = workspace('cloud', 'Workspace')
+    const createWorkspace = vi.fn(async () => created)
+    const b = mount([workspace('alpha', 'Alpha')], createWorkspace, occupancySource(false), true)
+    chooseAdd()
+    expect(createWorkspace).toHaveBeenCalledWith({})
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
+  })
+
+  it('retries empty cloud create from the error dialog without opening the directory flow', async () => {
+    const created = workspace('cloud', 'Workspace')
+    const createWorkspace = vi.fn()
+      .mockRejectedValueOnce(new Error('limit'))
+      .mockResolvedValueOnce(created)
+    mount([workspace('alpha', 'Alpha')], createWorkspace, occupancySource(true), true)
+    chooseAdd()
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: '无法打开文件夹' })).toBeTruthy()
+    })
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '重新选择' }))
+    await waitFor(() => { expect(createWorkspace).toHaveBeenCalledTimes(2) })
+    expect(createWorkspace).toHaveBeenLastCalledWith({})
     expect(screen.queryByTestId('directory-flow')).toBeNull()
   })
 

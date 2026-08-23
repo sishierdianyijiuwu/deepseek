@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/account/account-postgres/README.md
-README.md: 99ae227c27f5721848cac8c36b48be977dfa78ac
-README.zh.md: c975f750fe5c53a9f740776e25ad428b2b98635d
+README.md: bcd07d99a16fff1e25b72591ef5a04e30b0d6d4b
+README.zh.md: 0523b82f1f9f23564931ebac5453ec6b31e19f77

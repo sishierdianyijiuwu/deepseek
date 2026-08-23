@@ -249,7 +249,10 @@ export interface SessionsApi {
 
   /**
    * Creates a real session and its idle agent. At most one of `workspaceId` /
-   * `cwd` is accepted; an omitted project uses the Host cwd. A caller may
+   * `cwd` is accepted; an omitted project uses the Host cwd. When cloud
+   * Workspaces are composed, `workspaceId` is required and must be owned by
+   * the signed-in Account (`workspace-required` / `workspace-not-found`).
+   * A caller may
    * preallocate `sessionId`: retries with the same id and cwd return the same
    * session, while a different cwd fails with `session-conflict`. Workspace
    * creation attaches the session after publication; an attach failure

@@ -34,7 +34,7 @@ describe('dsh-hosted bundle', () => {
       patch => patch.insert ?? [],
     )
     const ids = rows.map(row => row.id)
-    expect(ids).toEqual(['mailer', 'accounts', 'account-http', 'ui-account'])
+    expect(ids).toEqual(['mailer', 'accounts', 'cloud-workspaces', 'account-http', 'ui-account'])
     for (const row of rows) {
       expect(manifest.dependencies).toHaveProperty(row.name ?? '')
     }

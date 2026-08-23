@@ -38,22 +38,28 @@ export interface WorkspaceView {
 /** Workspace-domain unary methods (the map keys workspace.* of RpcMethodMap). */
 export interface WorkspaceApi {
   /**
-   * Lists all workspaces in the registry's durable display order, plus the
+   * Lists workspaces in the registry's durable display order, plus the
    * registry-global archive set (the reconnect baseline of
    * `host/archived-sessions-changed`). Archived sessions stay in their
    * workspace's `sessionIds` account; grouping surfaces hide them.
+   * When cloud Workspaces are composed, `items` is the signed-in Account's
+   * Workspaces only and `emptyCreate` is true. When Accounts are composed,
+   * `archivedSessionIds` is that Account's archived Sessions (live owner or
+   * accounted under its Workspaces), not the process-global set.
    */
-  list(request: RpcRequest<{}>): Promise<RpcResponse<{ items: WorkspaceView[]; archivedSessionIds: SessionId[] }>>
+  list(request: RpcRequest<{}>): Promise<RpcResponse<{
+    items: WorkspaceView[]
+    archivedSessionIds: SessionId[]
+    emptyCreate?: boolean
+  }>>
 
   /**
-   * Creates (or idempotently resolves) a workspace over an EXISTING directory
-   * (no mkdir — a missing or non-directory path fails with
-   * `workspace-invalid-path`). A path resolving to a directory already owned
-   * by a workspace returns that workspace (`created: false`). Adoption allows
-   * distinct canonical paths whose basenames produce the same display title;
-   * the registry's basename title default names the new workspace.
+   * Local: creates (or idempotently resolves) a workspace over an EXISTING
+   * directory (`path` required; a missing or non-directory path fails with
+   * `workspace-invalid-path`). Cloud: creates an empty Account-owned Workspace
+   * (`path` must be omitted; a fourth Workspace fails with `workspace-limit`).
    */
-  create(request: RpcRequest<{ path: string }>):
+  create(request: RpcRequest<{ path?: string; title?: string }>):
   Promise<RpcResponse<{ workspace: WorkspaceView; created: boolean }>>
 
   /**
@@ -66,9 +72,10 @@ export interface WorkspaceApi {
   Promise<RpcResponse<{ workspace: WorkspaceView }>>
 
   /**
-   * Removes one Workspace registration. The directory, every user file, and
-   * every session log remain untouched; those Sessions consequently become
-   * ungrouped. An unknown id fails with `workspace-not-found`.
+   * Removes one Workspace. Local: drops only the registration; the directory
+   * and session logs remain and those Sessions become ungrouped. Cloud: also
+   * deletes the PostgreSQL row and the durable control-plane tree so the
+   * Account frees a slot. An unknown id fails with `workspace-not-found`.
    */
   delete(request: RpcRequest<{ workspaceId: WorkspaceId }>):
   Promise<RpcResponse<{ deleted: true }>>
@@ -101,9 +108,18 @@ export interface WorkspaceApi {
    * disappears from every grouping surface but keeps its session log and its
    * workspace accounting slot (a future unarchive restores its position).
    * Idempotent for an already archived id. A session neither live nor in
-   * session persistence fails with `session-not-found`. Returns the full
-   * updated set (same snapshot the changed frame carries).
+   * session persistence fails with `session-not-found`. When Accounts are
+   * composed, another Account's session is that same miss, and the returned
+   * set is the viewer's archived ids (same snapshot the changed frame carries).
    */
   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
+
+  /**
+   * Write one utf8 file into a cloud Workspace the signed-in Account owns.
+   * A tree that would exceed 1 GiB fails with `workspace-quota-exceeded`.
+   * Unknown or other-Account ids fail with `workspace-not-found`.
+   */
+  write(request: RpcRequest<{ workspaceId: WorkspaceId; path: string; data: string }>):
+  Promise<RpcResponse<{ written: true }>>
 }
