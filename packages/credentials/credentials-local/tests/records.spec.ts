@@ -84,6 +84,7 @@ describe('record storage', () => {
     const payload = { type: 'oauth', access: 'at', refresh: 'rt', expires: 1786000000000, accountId: 'acct_1' }
     await put(ctx, CODEX, { kind: 'grant', payload })
 
+    expect(await ctx.credentials.hasStoredSecret()).toBe(true)
     expect(await ctx.credentials.readRecord(CODEX)).toEqual({ kind: 'grant', payload })
     const reread = await boot({ path: join(dir, '.credentials.yaml'), watch: false })
     expect(await reread.credentials.readRecord(CODEX)).toEqual({ kind: 'grant', payload })

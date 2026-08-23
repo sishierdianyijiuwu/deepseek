@@ -41,7 +41,7 @@ import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
-  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
+  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, SubagentPromptReceipt, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
 } from './api/index.ts'
 import {
@@ -1080,6 +1080,26 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
   function isolationActive(): boolean {
     return ctx.get('accounts') !== undefined
+  }
+
+  /**
+   * Hosted prompt refusal: an Account with no stored model Credential cannot
+   * send a Session message. Visibility checks run first so a guessed id stays
+   * `session-not-found`.
+   * @param request - the RPC whose response should carry `credential-missing`.
+   * @returns the error response, or `undefined` when prompting may continue.
+   */
+  async function refuseMissingCredential<T>(request: RpcRequest<unknown>): Promise<RpcResponse<T> | undefined> {
+    if (!isolationActive()) return undefined
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined || !await credentials.hasStoredSecret()) {
+      return err(request, {
+        code: 'credential-missing',
+        message: 'this Account has no model Credential; save one in Settings → Models',
+        details: {},
+      })
+    }
+    return undefined
   }
 
   function headerVisibleTo(header: SessionHeader, viewer: AccountId | undefined): boolean {
@@ -2471,6 +2491,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
+        const missing = await refuseMissingCredential<{ accepted: true }>(request)
+        if (missing !== undefined) return missing
         const agent = resolved.agent
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
@@ -2789,6 +2811,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { parentSessionId },
           })
         }
+        const missing = await refuseMissingCredential<SubagentPromptReceipt>(request)
+        if (missing !== undefined) return missing
         const verified = await catalogChild(ctx, {
           parentSessionId, childSessionId, mode: 'continuable',
         }, signal)

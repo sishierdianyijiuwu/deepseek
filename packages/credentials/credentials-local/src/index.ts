@@ -671,6 +671,10 @@ export class LocalCredentialProvider extends CredentialProvider {
     })))
   }
 
+  override hasStoredSecret(): Promise<boolean> {
+    return Promise.resolve(this.values.size > 0 || this.records.size > 0)
+  }
+
   override async modifyRecord(
     key: CredentialKey,
     mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,

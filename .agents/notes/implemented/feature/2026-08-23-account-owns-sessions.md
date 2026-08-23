@@ -24,7 +24,7 @@ When `ctx.accounts` is composed, `dsh-client-connection` requires a live `dsh_si
 
 ## Consequences
 
-Hosted HTTP tests with two cookie jars are the source of truth. Password reset, Credentials, Workspaces, and Operator access remain later tickets. SQLite databases stamped schema 17 no longer open.
+Hosted HTTP tests with two cookie jars are the source of truth. Workspaces, Ban, and Operator access remain later tickets. SQLite databases stamped schema 17 no longer open.
 
 ## Required verification
 
