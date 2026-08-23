@@ -12,9 +12,9 @@ Status: implemented
 
 Operator 身份是 `dsh-account-postgres` 上的配置邮箱列表（`operatorEmails`，托管为 `DSH_OPERATOR_EMAILS`）。邮箱在加载时规范化；无效项会大声失败；空列表表示没有 Operator。首位注册者并不特殊。规范化邮箱在该列表上的 Account，走完普通的注册／验证／登录流程后就是 Operator。`lookupSignIn` 报告 `operator`。
 
-Ban 是 `accounts.banned_at`。`ban(email)` 设置它（幂等）并删除该 Account 的每一个 Sign-in session；Account 行保留。出示正确 Password 的 `signIn` 返回 `banned`。`lookupSignIn` 拒绝 Banned Account。`liftBan(email)` 清除 `banned_at`（幂等）。密码重置仍可替换 Password；在解除之前 `signIn` 仍为 `banned`。
+Ban 是 `accounts.banned_at`。`ban(email)` 设置它（幂等）并删除该 Account 的每一个 Sign-in session；Account 行保留。`signIn` 先校验 Password，再对 Account 做 `SELECT … FOR UPDATE`，复核 `verified_at` / `banned_at`，然后才插入 Sign-in session（或返回 `banned`）。`lookupSignIn` 对 Banned Account 返回 `undefined`。`liftBan(email)` 清除 `banned_at`（幂等）并删除残留的 Sign-in session，以免竞态插入在解除后变成有效 cookie。密码重置仍可替换 Password；在解除之前 `signIn` 仍为 `banned`。
 
-注册冻结是单例 `registration_control.frozen_at`。冻结时 `register` 返回 `registration_frozen` 且不插入行。
+注册冻结是单例 `registration_control.frozen_at`。`register` 先哈希，再锁住 `registration_control` 并在插入前重读 `frozen_at`。冻结时 `register` 返回 `registration_frozen` 且不插入行。
 
 HTTP Operator 路由落在现有鉴权 Consumer 上、`/api` 旁边：
 
@@ -43,7 +43,7 @@ HTTP Operator 路由落在现有鉴权 Consumer 上、`/api` 旁边：
 
 ## 测试
 
-带 PGlite、假邮件发送和两个 cookie jar 的 Loader 组合 HTTP 钉住：首位注册者不是 Operator；只有 `operatorEmails` 能 Ban、解除、冻结和解冻；普通和未认证调用方得到 `forbidden`；Ban 结束有效 cookie 且 `signIn` 返回 `banned`；再次注册是 `email_taken`；解除后恢复登录；冻结返回 `registration_frozen`，解冻后允许注册；Ban 之后的重置在解除前仍让 `signIn` 为 `banned`。测试不调用 `/api`，也不读取 Session 正文。
+带 PGlite、假邮件发送和两个 cookie jar 的 Loader 组合 HTTP 钉住：首位注册者不是 Operator；只有 `operatorEmails` 能 Ban、解除、冻结和解冻；普通和未认证调用方得到 `forbidden`；Ban 结束有效 cookie 且 `signIn` 返回 `banned`；再次注册是 `email_taken`；解除后恢复登录；冻结返回 `registration_frozen`，解冻后允许注册；Ban 之后的重置在解除前仍让 `signIn` 为 `banned`；并发 Ban-during-signIn 在解除后没有有效 cookie；并发 freeze-during-register 使之后的注册仍冻结。测试不调用 `/api`，也不读取 Session 正文。
 
 ## 后果
 

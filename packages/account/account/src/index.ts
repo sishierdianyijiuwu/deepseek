@@ -114,7 +114,8 @@ export abstract class Accounts extends Service {
    * Resolve a presented Sign-in session id to the owning Account. A live
    * Sign-in session is slid forward by the configured lifetime.
    * @param signInId - the id the browser presented.
-   * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
+   * @returns the live Sign-in session, or `undefined` when it is unknown,
+   *   expired, or the Account is Banned.
    */
   abstract lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined>
 
@@ -147,7 +148,8 @@ export abstract class Accounts extends Service {
   abstract ban(email: string): Promise<BanResult>
 
   /**
-   * Lift a Ban. Idempotent when the Account is not Banned.
+   * Lift a Ban. Idempotent when the Account is not Banned. Leftover Sign-in
+   * sessions for that Account end so a raced insert cannot become live.
    * @param email - target Account email.
    * @returns `{ ok: true }` when the Account exists, or `not_found`.
    */

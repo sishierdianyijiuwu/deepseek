@@ -179,13 +179,31 @@ describe('postgres accounts', () => {
       publicBaseUrl: 'http://example.test',
     }).await()
     const impl = ctx.accounts as unknown as {
-      client: () => { transaction: (fn: unknown) => Promise<unknown> }
+      client: () => {
+        query: () => Promise<{ rows: unknown[] }>
+        transaction: (fn: unknown) => Promise<unknown>
+      }
     }
     vi.spyOn(impl, 'client').mockReturnValue({
       query: () => Promise.resolve({ rows: [] }),
       transaction: () => Promise.reject(new Error('disk')),
     })
     await expect(ctx.accounts.register('boom@example.com', 'password12')).rejects.toThrow('disk')
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses register when freeze commits after the cheap check', { timeout: 30_000 }, async () => {
+    mailbox.length = 0
+    const ctx = new Context()
+    await ctx.plugin(SilentMailer).await()
+    await ctx.plugin(PostgresAccounts, {
+      url: 'pglite:',
+      publicBaseUrl: 'http://example.test',
+    }).await()
+    await ctx.accounts.setRegistrationFrozen(true)
+    vi.spyOn(PostgresAccounts.prototype, 'isRegistrationFrozen').mockResolvedValue(false)
+    await expect(ctx.accounts.register('late@example.com', 'password12'))
+      .resolves.toEqual({ ok: false, error: 'registration_frozen' })
     await ctx.fiber.dispose()
   })
 })

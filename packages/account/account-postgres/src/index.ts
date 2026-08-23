@@ -178,7 +178,14 @@ export class PostgresAccounts extends Accounts {
     const token = mintSecret()
     const now = Date.now()
     try {
-      await this.client().transaction(async (sql) => {
+      const frozen = await this.client().transaction(async (sql) => {
+        await sql.query(
+          'INSERT INTO registration_control (id, frozen_at) VALUES (1, NULL) ON CONFLICT (id) DO NOTHING',
+        )
+        const control = await sql.query(
+          'SELECT frozen_at FROM registration_control WHERE id = 1 FOR UPDATE',
+        )
+        if (control.rows[0]?.['frozen_at'] != null) return true
         await sql.query(
           `INSERT INTO accounts (id, email, email_normalized, password_hash, verified_at, created_at)
            VALUES ($1, $2, $3, $4, NULL, $5)`,
@@ -189,7 +196,9 @@ export class PostgresAccounts extends Accounts {
            VALUES ($1, $2, $3)`,
           [token.hash, id, now + this.verificationTtlMs],
         )
+        return false
       })
+      if (frozen) return { ok: false, error: 'registration_frozen' }
     } catch (error) {
       if (isUniqueViolation(error)) return { ok: false, error: 'email_taken' }
       throw error
@@ -268,6 +277,7 @@ export class PostgresAccounts extends Accounts {
 
   /**
    * Create a Sign-in session after a verified Account presents the Password.
+   * After scrypt, re-reads `verified_at` / `banned_at` under `FOR UPDATE`.
    * @param email - visitor-supplied email.
    * @param password - visitor-supplied Password.
    * @returns a Sign-in session id on success, or `banned` when Ban is in force.
@@ -283,17 +293,26 @@ export class PostgresAccounts extends Accounts {
     const hash = found?.password_hash ?? await this.dummyPasswordHash()
     const matches = await verifyPassword(password, hash)
     if (found === undefined || !matches) return { ok: false, error: 'invalid_credentials' }
-    if (found.verified_at == null) return { ok: false, error: 'unverified' }
-    if (found.banned_at != null) return { ok: false, error: 'banned' }
     const session = mintSecret()
     const now = Date.now()
     const expiresAt = now + this.signInTtlMs
-    await this.client().query(
-      `INSERT INTO sign_in_sessions (id_hash, account_id, created_at, expires_at)
-       VALUES ($1, $2, $3, $4)`,
-      [session.hash, found.id, now, expiresAt],
-    )
-    return { ok: true, signInId: signInSessionId(session.raw), expiresAt }
+    return this.client().transaction(async (sql) => {
+      const locked = await sql.query(
+        'SELECT verified_at, banned_at FROM accounts WHERE id = $1 FOR UPDATE',
+        [found.id],
+      )
+      const row = locked.rows[0] as Pick<AccountRow, 'verified_at' | 'banned_at'> | undefined
+      /* v8 ignore next -- Deletion is a later ticket; this id was just read from accounts. */
+      if (row === undefined) return { ok: false, error: 'invalid_credentials' }
+      if (row.verified_at == null) return { ok: false, error: 'unverified' }
+      if (row.banned_at != null) return { ok: false, error: 'banned' }
+      await sql.query(
+        `INSERT INTO sign_in_sessions (id_hash, account_id, created_at, expires_at)
+         VALUES ($1, $2, $3, $4)`,
+        [session.hash, found.id, now, expiresAt],
+      )
+      return { ok: true, signInId: signInSessionId(session.raw), expiresAt }
+    })
   }
 
   /**
@@ -310,7 +329,8 @@ export class PostgresAccounts extends Accounts {
   /**
    * Resolve a presented Sign-in session id and slide its expiry forward.
    * @param signInId - the id the browser presented.
-   * @returns the live Sign-in session, or `undefined` when it is unknown or expired.
+   * @returns the live Sign-in session, or `undefined` when it is unknown,
+   *   expired, or the Account is Banned.
    */
   override async lookupSignIn(signInId: SignInSessionId): Promise<SignInLookup | undefined> {
     const now = Date.now()
@@ -431,19 +451,31 @@ export class PostgresAccounts extends Accounts {
   }
 
   /**
-   * Lift a Ban.
+   * Lift a Ban and delete leftover Sign-in sessions so a raced insert cannot
+   * become a live cookie.
    * @param email - target Account email.
    * @returns `{ ok: true }` when the Account exists, or `not_found`.
    */
   override async liftBan(email: string): Promise<BanResult> {
     const normalized = normalizeEmail(email)
     if (normalized === undefined) return { ok: false, error: 'invalid_email' }
-    const found = await this.client().query(
-      'UPDATE accounts SET banned_at = NULL WHERE email_normalized = $1 RETURNING id',
-      [normalized],
-    )
-    if (found.rows[0] === undefined) return { ok: false, error: 'not_found' }
-    return { ok: true }
+    return this.client().transaction(async (sql) => {
+      const found = await sql.query(
+        'SELECT id FROM accounts WHERE email_normalized = $1 FOR UPDATE',
+        [normalized],
+      )
+      const row = found.rows[0] as { id: string } | undefined
+      if (row === undefined) return { ok: false, error: 'not_found' }
+      await sql.query(
+        'UPDATE accounts SET banned_at = NULL WHERE id = $1',
+        [row.id],
+      )
+      await sql.query(
+        'DELETE FROM sign_in_sessions WHERE account_id = $1',
+        [row.id],
+      )
+      return { ok: true }
+    })
   }
 
   /**

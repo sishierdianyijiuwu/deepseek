@@ -12,9 +12,9 @@ A public registration page cannot treat the first Account as an Operator: that r
 
 Operator identity is a configured email list on `dsh-account-postgres` (`operatorEmails`, hosted as `DSH_OPERATOR_EMAILS`). Emails are normalized at load; an invalid entry fails loud; an empty list means no Operators. The first registrant is not special. An Account whose normalized email is on that list is an Operator after the ordinary register / verify / sign-in flow. `lookupSignIn` reports `operator`.
 
-Ban is `accounts.banned_at`. `ban(email)` sets it (idempotent) and deletes every Sign-in session for that Account; the Account row stays. `signIn` with the correct Password returns `banned`. `lookupSignIn` refuses a Banned Account. `liftBan(email)` clears `banned_at` (idempotent). Password reset may still replace the Password; `signIn` stays `banned` until lift.
+Ban is `accounts.banned_at`. `ban(email)` sets it (idempotent) and deletes every Sign-in session for that Account; the Account row stays. `signIn` verifies the Password, then `SELECT … FOR UPDATE`s the Account, re-checks `verified_at` / `banned_at`, and only then inserts a Sign-in session (or returns `banned`). `lookupSignIn` returns `undefined` for a Banned Account. `liftBan(email)` clears `banned_at` (idempotent) and deletes leftover Sign-in sessions so a raced insert cannot become a live cookie after lift. Password reset may still replace the Password; `signIn` stays `banned` until lift.
 
-Registration freeze is singleton `registration_control.frozen_at`. Frozen `register` returns `registration_frozen` and does not insert a row.
+Registration freeze is singleton `registration_control.frozen_at`. `register` hashes, then locks `registration_control` and re-reads `frozen_at` before insert. Frozen `register` returns `registration_frozen` and does not insert a row.
 
 HTTP Operator routes live beside `/api` on the existing auth Consumer:
 
@@ -43,7 +43,7 @@ They require a live Sign-in session with `operator: true`. Unauthenticated calle
 
 ## Testing
 
-Loader-composed HTTP with PGlite, a fake mailer, and two cookie jars pins: the first registrant is not an Operator; only `operatorEmails` can Ban, lift, freeze, and unfreeze; ordinary and unauthenticated callers get `forbidden`; Ban ends the live cookie and `signIn` returns `banned`; re-register is `email_taken`; lift restores sign-in; freeze returns `registration_frozen` then unfreeze allows register; reset after Ban still leaves `signIn` as `banned` until lift. Tests do not call `/api` or read a Session body.
+Loader-composed HTTP with PGlite, a fake mailer, and two cookie jars pins: the first registrant is not an Operator; only `operatorEmails` can Ban, lift, freeze, and unfreeze; ordinary and unauthenticated callers get `forbidden`; Ban ends the live cookie and `signIn` returns `banned`; re-register is `email_taken`; lift restores sign-in; freeze returns `registration_frozen` then unfreeze allows register; reset after Ban still leaves `signIn` as `banned` until lift; concurrent Ban-during-signIn leaves no live cookie after lift; concurrent freeze-during-register leaves later register frozen. Tests do not call `/api` or read a Session body.
 
 ## Consequences
 
