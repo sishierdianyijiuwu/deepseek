@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Accounts, accountId, runWithAccount } from '@deepseek-ai/dsh-account'
-import type { RegisterResult, SignInLookup, SignInResult, SignInSessionId, VerifyEmailResult } from '@deepseek-ai/dsh-account'
+import type { RegisterResult, ResetPasswordResult, SignInLookup, SignInResult, SignInSessionId, VerifyEmailResult } from '@deepseek-ai/dsh-account'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -44,6 +44,12 @@ class FakeAccounts extends Accounts {
   }
   override lookupSignIn(_signInId: SignInSessionId): Promise<SignInLookup | undefined> {
     return Promise.resolve(undefined)
+  }
+  override requestPasswordReset(): Promise<void> {
+    return Promise.resolve()
+  }
+  override resetPassword(): Promise<ResetPasswordResult> {
+    return Promise.resolve({ ok: false, error: 'invalid_or_expired' })
   }
 }
 
