@@ -44,6 +44,18 @@ export const workspaceCreateValueSchema = z.object({
   created: z.boolean(),
 }) satisfies z.ZodType<Wire<ResponseValue<'workspace.create'>>>
 
+/** workspace.import request payload: a public HTTPS git URL. */
+export const workspaceImportRequestSchema = z.object({
+  gitUrl: z.string().min(1),
+  title: z.string().optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'workspace.import'>>>
+
+/** workspace.import response value (always a newly created Workspace). */
+export const workspaceImportValueSchema = z.object({
+  workspace: workspaceViewSchema,
+  created: z.boolean(),
+}) satisfies z.ZodType<Wire<ResponseValue<'workspace.import'>>>
+
 /** workspace.rename request payload: the new title must be non-blank. */
 export const workspaceRenameRequestSchema = z.object({
   workspaceId: workspaceIdSchema,

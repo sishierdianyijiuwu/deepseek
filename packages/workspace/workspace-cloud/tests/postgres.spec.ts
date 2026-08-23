@@ -9,6 +9,8 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry, { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import CloudWorkspaces, {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
   CloudWorkspaceLimitError,
   CloudWorkspaceNotFoundError,
   CloudWorkspaceQuotaError,
@@ -16,6 +18,7 @@ import CloudWorkspaces, {
   MAX_WORKSPACE_BYTES,
   MAX_WORKSPACES_PER_ACCOUNT,
 } from '../src/index.ts'
+import { createBareRepo, generateSelfSignedTls, listenGitHttps } from './git-http-fixture.ts'
 
 let root: string | undefined
 let ctx: Context | undefined
@@ -178,5 +181,80 @@ describe('CloudWorkspaces', () => {
     const second = await boot({ rootDir, url })
     expect(second.cloud.listOwned(owner).map(item => item.title).sort()).toEqual(['One', 'Renamed', 'Two'])
     await expect(second.cloud.createEmpty(owner)).rejects.toBeInstanceOf(CloudWorkspaceLimitError)
+  })
+
+  it('imports a local public HTTPS git fixture into an owned slot and refuses private remotes', {
+    timeout: 60_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const publicRoot = join(rootDir, 'git-public')
+    await mkdir(publicRoot)
+    await createBareRepo(publicRoot, 'notes', { 'README.md': 'hello import\n' })
+    const pub = await listenGitHttps({ root: publicRoot, key: tls.key, cert: tls.cert })
+    const privateRoot = join(rootDir, 'git-private')
+    await mkdir(privateRoot)
+    await createBareRepo(privateRoot, 'secret', { 'secret.txt': 'nope\n' })
+    const priv = await listenGitHttps({
+      root: privateRoot, key: tls.key, cert: tls.cert,
+      basicAuth: { user: 'owner', pass: 'secret' },
+    })
+    try {
+      const owner = accountId('importer')
+      const other = accountId('stranger')
+      const imported = await cloud.importPublicGit(owner, pub.url('notes'), '  ')
+      expect(imported.title).toBe('notes')
+      expect(imported.path).toContain(owner)
+      expect(await readFile(join(imported.path, 'README.md'), 'utf8')).toBe('hello import\n')
+      expect(cloud.owns(owner, imported.id)).toBe(true)
+      expect(cloud.owns(other, imported.id)).toBe(false)
+      expect(cloud.listOwned(other)).toEqual([])
+
+      await expect(cloud.importPublicGit(owner, 'https://user:token@example.com/acme/notes.git'))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportUrlError)
+      await expect(cloud.importPublicGit(owner, 'http://127.0.0.1/notes.git'))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportUrlError)
+      await expect(cloud.importPublicGit(owner, 'git@example.com:acme/notes.git'))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportUrlError)
+      await expect(cloud.importPublicGit(owner, priv.url('secret')))
+        .rejects.toBeInstanceOf(CloudWorkspaceImportError)
+      expect(cloud.listOwned(owner)).toHaveLength(1)
+    } finally {
+      await pub.close()
+      await priv.close()
+    }
+  })
+
+  it('refuses Import that would take a fourth slot or exceed 1 GiB', {
+    timeout: 120_000,
+  }, async () => {
+    const { cloud, rootDir } = await boot()
+    const tlsDir = join(rootDir, 'tls-cap')
+    await mkdir(tlsDir)
+    const tls = await generateSelfSignedTls(tlsDir)
+    const gitRoot = join(rootDir, 'git-cap')
+    await mkdir(gitRoot)
+    await createBareRepo(gitRoot, 'tiny', { 'ok.txt': 'ok\n' })
+    await createBareRepo(gitRoot, 'huge', { pad: { truncate: MAX_WORKSPACE_BYTES } })
+    const server = await listenGitHttps({ root: gitRoot, key: tls.key, cert: tls.cert })
+    try {
+      const owner = accountId('capped')
+      await cloud.createEmpty(owner, 'One')
+      await cloud.createEmpty(owner, 'Two')
+      await cloud.importPublicGit(owner, server.url('tiny'), 'Three')
+      expect(cloud.listOwned(owner)).toHaveLength(MAX_WORKSPACES_PER_ACCOUNT)
+      await expect(cloud.importPublicGit(owner, server.url('tiny')))
+        .rejects.toBeInstanceOf(CloudWorkspaceLimitError)
+      expect(cloud.listOwned(owner)).toHaveLength(3)
+
+      const other = accountId('quota-import')
+      await expect(cloud.importPublicGit(other, server.url('huge')))
+        .rejects.toBeInstanceOf(CloudWorkspaceQuotaError)
+      expect(cloud.listOwned(other)).toEqual([])
+    } finally {
+      await server.close()
+    }
   })
 })

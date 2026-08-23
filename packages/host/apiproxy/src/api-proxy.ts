@@ -32,6 +32,8 @@ import {
 } from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-workspace-cloud'
 import {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
   CloudWorkspaceLimitError,
   CloudWorkspaceNotFoundError,
   CloudWorkspacePathError,
@@ -3005,6 +3007,53 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             message: `cannot create a workspace at "${path}": ${error instanceof Error ? error.message : String(error)}`,
             details: { path },
           })
+        }
+      },
+
+      async import(request) {
+        const { gitUrl, title } = request.payload
+        const cloud = ctx.get('cloudWorkspaces')
+        if (cloud === undefined) {
+          return err(request, {
+            code: 'workspace-import-refused',
+            message: 'git Import requires cloud Workspaces',
+            details: { gitUrl },
+          })
+        }
+        const account = currentAccountId()
+        if (account === undefined) {
+          return err(request, {
+            code: 'workspace-not-found',
+            message: 'workspace import requires a Sign-in session',
+            details: { workspaceId: '' },
+          })
+        }
+        try {
+          const workspace = await cloud.importPublicGit(account, gitUrl, title)
+          return ok(request, { workspace: workspaceView(workspace), created: true })
+        } catch (error: unknown) {
+          if (error instanceof CloudWorkspaceLimitError) {
+            return err(request, {
+              code: 'workspace-limit',
+              message: error.message,
+              details: { max: MAX_WORKSPACES_PER_ACCOUNT },
+            })
+          }
+          if (error instanceof CloudWorkspaceQuotaError) {
+            return err(request, {
+              code: 'workspace-quota-exceeded',
+              message: error.message,
+              details: { maxBytes: MAX_WORKSPACE_BYTES },
+            })
+          }
+          if (error instanceof CloudWorkspaceImportUrlError || error instanceof CloudWorkspaceImportError) {
+            return err(request, {
+              code: 'workspace-import-refused',
+              message: error.message,
+              details: { gitUrl: error.gitUrl },
+            })
+          }
+          throw error
         }
       },
 

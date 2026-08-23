@@ -16,7 +16,7 @@ PostgreSQL is the source of truth for slots and ownership. Startup adopts each r
 
 When the plugin is composed, Host `workspace.list` returns only that Account's Workspaces, `emptyCreate: true`, and archived Session ids accounted under those Workspaces; `workspace.create` ignores laptop paths and creates empty; `session.create` requires an owned `workspaceId` (`workspace-required`). `host.pickDirectory` / `listDirectory` / `createDirectory` fail. The hosted bundle disables `directory-picker` and loads this plugin with `DSH_POSTGRES_URL` and `DSH_WORKSPACE_ROOT`. The Web picker uses `emptyCreate` to add a Workspace without the native directory flow; a failed empty create retries empty create, not a folder chooser.
 
-Git Import and E2B copy-back are not this decision; they must ingest through the same cap (`writeFile` or an equivalent tree write). Session cwd tool writes bypass `writeFile` until E2B hydrate is that ingest.
+Public git Import is [the Import Agent Note](2026-08-23-public-git-workspace-import.md). E2B copy-back is not this decision; it must ingest through the same cap (`writeFile` or an equivalent tree write). Session cwd tool writes bypass `writeFile` until E2B hydrate is that ingest.
 
 ## Alternatives considered
 
@@ -28,4 +28,4 @@ Git Import and E2B copy-back are not this decision; they must ingest through the
 
 ## Consequences
 
-Hosted UI add-workspace no longer depends on a directory picker, and hosted `/api` cannot browse the control-plane disk. Local `dsh web` is unchanged when `cloudWorkspaces` is absent. Durable bytes stay ordinary files; Postgres never stores the tree. Import (#8) and E2B hydrate (#9) reuse `writeFile`'s cap rather than inventing a second quota check.
+Hosted UI add-workspace no longer depends on a directory picker, and hosted `/api` cannot browse the control-plane disk. Local `dsh web` is unchanged when `cloudWorkspaces` is absent. Durable bytes stay ordinary files; Postgres never stores the tree. Import reuses the same 1 GiB cap ([Import Agent Note](2026-08-23-public-git-workspace-import.md)); E2B hydrate still will.

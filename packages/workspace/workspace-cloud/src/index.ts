@@ -1,6 +1,7 @@
 /**
- * Cloud Workspaces (`ctx.cloudWorkspaces`): empty Account-owned directories
- * on the control-plane filesystem, metadata in PostgreSQL, count and size caps.
+ * Cloud Workspaces (`ctx.cloudWorkspaces`): Account-owned directories on the
+ * control-plane filesystem (empty or public-git Import), metadata in PostgreSQL,
+ * count and size caps.
  * @module @deepseek-ai/dsh-workspace-cloud
  */
 
@@ -13,18 +14,34 @@ import type { AccountId } from '@deepseek-ai/dsh-account'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { isUniqueViolation, openSql, type SqlClient } from '@deepseek-ai/dsh-account-postgres'
-import { writeWorkspaceFile } from './files.ts'
+import {
+  CloudWorkspacePathError,
+  CloudWorkspaceQuotaError,
+  MAX_WORKSPACE_BYTES,
+  treeBytes,
+  writeWorkspaceFile,
+} from './files.ts'
+import {
+  clonePublicGit,
+  DEFAULT_WORKSPACE_TITLE,
+  parsePublicHttpsGitUrl,
+  titleFromGitUrl,
+} from './git.ts'
 import { ensureSchema, SCHEMA_VERSION } from './schema.ts'
 
 export { SCHEMA_VERSION }
-export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError } from './files.ts'
+export { MAX_WORKSPACE_BYTES, CloudWorkspacePathError, CloudWorkspaceQuotaError }
+export {
+  CloudWorkspaceImportError,
+  CloudWorkspaceImportUrlError,
+  DEFAULT_WORKSPACE_TITLE,
+  parsePublicHttpsGitUrl,
+  titleFromGitUrl,
+} from './git.ts'
 export type { CloudWorkspaceRecord } from './types.ts'
 
 /** v1 cap: three Workspaces per Account (ADR 0009). */
 export const MAX_WORKSPACES_PER_ACCOUNT = 3
-
-/** Display title used when create omits one. */
-export const DEFAULT_WORKSPACE_TITLE = 'Workspace'
 
 /** The Account already holds {@link MAX_WORKSPACES_PER_ACCOUNT} Workspaces. */
 export class CloudWorkspaceLimitError extends Error {
@@ -63,12 +80,13 @@ export interface Config {
 }
 
 /**
- * Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories
- * namespaced by Account, persist metadata in PostgreSQL, and enforce the
- * v1 count and size caps. The Host workspace registry still owns session
- * membership for those directories. PostgreSQL is the ownership and slot
- * source of truth: startup adopts each row into the registry by path so a
- * wiped KV store does not hide live directories.
+ * Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or
+ * Import a public HTTPS git remote into a new slot namespaced by Account,
+ * persist metadata in PostgreSQL, and enforce the v1 count and size caps.
+ * The Host workspace registry still owns session membership for those
+ * directories. PostgreSQL is the ownership and slot source of truth: startup
+ * adopts each row into the registry by path so a wiped KV store does not
+ * hide live directories.
  */
 export class CloudWorkspaces extends Service {
   static inject = ['workspaceRegistry']
@@ -173,6 +191,40 @@ export class CloudWorkspaces extends Service {
       }
       return entity
     }
+  }
+
+  /**
+   * Import a public HTTPS git remote into a new owned Workspace slot.
+   * Private, credential-bearing, and non-HTTPS remotes are refused before
+   * clone; a tree past 1 GiB frees the slot and throws
+   * {@link CloudWorkspaceQuotaError}. Clone failure frees the slot.
+   * @param accountId - owning Account.
+   * @param gitUrl - public HTTPS git URL.
+   * @param title - display title; omitted or blank uses the repo basename.
+   * @returns the registry Workspace after clone and the size check.
+   */
+  async importPublicGit(accountId: AccountId, gitUrl: string, title?: string): Promise<Workspace> {
+    const url = parsePublicHttpsGitUrl(gitUrl)
+    const workspaceTitle = title !== undefined && title.trim() !== ''
+      ? title.trim()
+      : titleFromGitUrl(url)
+    const workspace = await this.createEmpty(accountId, workspaceTitle)
+    try {
+      await clonePublicGit(url, workspace.path)
+      const bytes = await treeBytes(workspace.path)
+      if (bytes > MAX_WORKSPACE_BYTES) throw new CloudWorkspaceQuotaError(0, bytes)
+    } catch (error: unknown) {
+      try {
+        await this.deleteOwned(accountId, workspace.id)
+      } catch (cleanup: unknown) {
+        throw new AggregateError(
+          [error, cleanup],
+          `Import of '${url.href}' failed and the Workspace slot could not be freed`,
+        )
+      }
+      throw error
+    }
+    return workspace
   }
 
   /**

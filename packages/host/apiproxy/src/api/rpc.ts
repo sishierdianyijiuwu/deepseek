@@ -44,6 +44,7 @@ export interface RpcErrorDetailsMap {
   'workspace-required': {}
   'workspace-limit': { max: number }
   'workspace-quota-exceeded': { maxBytes: number }
+  'workspace-import-refused': { gitUrl: string }
   'directory-unreadable': { path: string }
   'directory-exists': { path: string }
   'directory-create-failed': { path: string }

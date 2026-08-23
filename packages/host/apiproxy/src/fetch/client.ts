@@ -35,6 +35,7 @@ import {
   workspaceArchiveSessionValueSchema,
   workspaceCreateValueSchema,
   workspaceDeleteValueSchema,
+  workspaceImportValueSchema,
   workspaceInsertBeforeValueSchema,
   workspaceInsertSessionBeforeValueSchema,
   workspaceListValueSchema,
@@ -116,6 +117,7 @@ export interface IApiClient {
   workspace: {
     list(payload: RequestPayload<'workspace.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.list'>>>
     create(payload: RequestPayload<'workspace.create'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.create'>>>
+    import(payload: RequestPayload<'workspace.import'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.import'>>>
     rename(payload: RequestPayload<'workspace.rename'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.rename'>>>
     delete(payload: RequestPayload<'workspace.delete'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.delete'>>>
     insertBefore(payload: RequestPayload<'workspace.insertBefore'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'workspace.insertBefore'>>>
@@ -195,6 +197,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'host.openPath': hostOpenPathValueSchema,
   'workspace.list': workspaceListValueSchema,
   'workspace.create': workspaceCreateValueSchema,
+  'workspace.import': workspaceImportValueSchema,
   'workspace.rename': workspaceRenameValueSchema,
   'workspace.delete': workspaceDeleteValueSchema,
   'workspace.insertBefore': workspaceInsertBeforeValueSchema,
@@ -449,6 +452,7 @@ export abstract class AbstractApiClient implements IApiClient {
   readonly workspace: IApiClient['workspace'] = {
     list: (payload, signal) => this.callUnary('workspace.list', payload, signal),
     create: (payload, signal) => this.callUnary('workspace.create', payload, signal),
+    import: (payload, signal) => this.callUnary('workspace.import', payload, signal),
     rename: (payload, signal) => this.callUnary('workspace.rename', payload, signal),
     delete: (payload, signal) => this.callUnary('workspace.delete', payload, signal),
     insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal),

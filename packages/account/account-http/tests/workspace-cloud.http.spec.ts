@@ -3,7 +3,7 @@
  * Caps and cross-Account denial are observed as HTTP status and RPC bodies.
  */
 
-import { mkdtemp, open, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -27,6 +27,7 @@ import * as AccountHttp from '../src/index.ts'
 import { SIGN_IN_COOKIE } from '../src/index.ts'
 import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import CloudWorkspaces, { MAX_WORKSPACE_BYTES } from '@deepseek-ai/dsh-workspace-cloud'
+import { createBareRepo, generateSelfSignedTls, listenGitHttps } from '../../../workspace/workspace-cloud/tests/git-http-fixture.ts'
 
 let root: string | undefined
 let context: Context | undefined
@@ -349,5 +350,77 @@ describe('Cloud Workspaces over HTTP', () => {
 
     const laptop = await rpc(harness, jarA, 'workspace.create', { path: '/tmp/not-cloud' })
     expect(rpcError(laptop.body)).toBe('workspace-invalid-path')
+  })
+
+  it('imports a local public HTTPS git fixture, refuses private remotes, and enforces caps', {
+    timeout: 120_000,
+  }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jarA = await signInAccount(harness, 'import-a@example.com', password)
+    const jarB = await signInAccount(harness, 'import-b@example.com', password)
+
+    const tlsDir = join(root!, 'git-tls')
+    const publicRoot = join(root!, 'git-public')
+    const privateRoot = join(root!, 'git-private')
+    await mkdir(tlsDir)
+    await mkdir(publicRoot)
+    await mkdir(privateRoot)
+    const tls = await generateSelfSignedTls(tlsDir)
+    await createBareRepo(publicRoot, 'notes', { 'README.md': 'from git\n' })
+    await createBareRepo(publicRoot, 'huge', { pad: { truncate: MAX_WORKSPACE_BYTES } })
+    await createBareRepo(privateRoot, 'secret', { 'secret.txt': 'nope\n' })
+    const pub = await listenGitHttps({ root: publicRoot, key: tls.key, cert: tls.cert })
+    const priv = await listenGitHttps({
+      root: privateRoot, key: tls.key, cert: tls.cert,
+      basicAuth: { user: 'owner', pass: 'secret' },
+    })
+    try {
+      const imported = await rpc(harness, jarA, 'workspace.import', { gitUrl: pub.url('notes') })
+      expect(imported.status).toBe(200)
+      const importedBody = imported.body as {
+        result?: { ok?: boolean; value?: { workspace: { workspaceId: string; path: string; title: string }; created: boolean } }
+      }
+      expect(importedBody.result?.ok).toBe(true)
+      expect(importedBody.result?.value?.created).toBe(true)
+      const workspaceId = importedBody.result?.value?.workspace.workspaceId
+      const workspacePath = importedBody.result?.value?.workspace.path
+      expect(importedBody.result?.value?.workspace.title).toBe('notes')
+      expect(workspaceId).toEqual(expect.any(String))
+      expect(workspacePath).toContain(join('workspaces'))
+      const { readFile } = await import('node:fs/promises')
+      expect(await readFile(join(workspacePath!, 'README.md'), 'utf8')).toBe('from git\n')
+
+      expect(workspaceItems((await rpc(harness, jarB, 'workspace.list', {})).body)).toEqual([])
+      expect(rpcError((await rpc(harness, jarB, 'workspace.write', {
+        workspaceId, path: 'stolen.txt', data: 'no',
+      })).body)).toBe('workspace-not-found')
+      expect(rpcError((await rpc(harness, jarB, 'workspace.delete', { workspaceId })).body))
+        .toBe('workspace-not-found')
+      expect(rpcError((await rpc(harness, jarB, 'session.create', { workspaceId })).body))
+        .toBe('workspace-not-found')
+
+      expect(rpcError((await rpc(harness, jarA, 'workspace.import', {
+        gitUrl: 'https://user:token@example.com/acme/notes.git',
+      })).body)).toBe('workspace-import-refused')
+      expect(rpcError((await rpc(harness, jarA, 'workspace.import', {
+        gitUrl: 'git@example.com:acme/notes.git',
+      })).body)).toBe('workspace-import-refused')
+      expect(rpcError((await rpc(harness, jarA, 'workspace.import', {
+        gitUrl: priv.url('secret'),
+      })).body)).toBe('workspace-import-refused')
+
+      await rpc(harness, jarA, 'workspace.create', { title: 'Two' })
+      await rpc(harness, jarA, 'workspace.create', { title: 'Three' })
+      expect(rpcError((await rpc(harness, jarA, 'workspace.import', { gitUrl: pub.url('notes') })).body))
+        .toBe('workspace-limit')
+
+      expect(rpcError((await rpc(harness, jarB, 'workspace.import', { gitUrl: pub.url('huge') })).body))
+        .toBe('workspace-quota-exceeded')
+      expect(workspaceItems((await rpc(harness, jarB, 'workspace.list', {})).body)).toEqual([])
+    } finally {
+      await pub.close()
+      await priv.close()
+    }
   })
 })
