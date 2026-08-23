@@ -110,6 +110,23 @@ describe('CloudWorkspaces', () => {
     expect(cloud.listOwned(owner)).toHaveLength(3)
   })
 
+  it('deleteAllOwned removes every owned Workspace and the Account prefix', { timeout: 30_000 }, async () => {
+    const { cloud, files } = await boot()
+    const owner = accountId('account-a')
+    const other = accountId('account-b')
+    const first = await cloud.createEmpty(owner, 'One')
+    const second = await cloud.createEmpty(owner, 'Two')
+    const stranger = await cloud.createEmpty(other, 'Other')
+    await cloud.writeFile(owner, first.id, 'a.txt', Buffer.from('a'))
+    await cloud.deleteAllOwned(owner)
+    expect(cloud.listOwned(owner)).toEqual([])
+    expect(cloud.listOwned(other).map(item => item.id)).toEqual([stranger.id])
+    await expect(stat(first.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(second.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(files, owner))).rejects.toMatchObject({ code: 'ENOENT' })
+    await stat(stranger.path)
+  })
+
   it('creates concurrently without exceeding the count cap', { timeout: 30_000 }, async () => {
     const { cloud } = await boot()
     const owner = accountId('race')

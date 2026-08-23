@@ -1,7 +1,7 @@
 /**
  * Account gate plugin, browser half: occupies `shell.overlay` with register,
- * sign-in, verification notice, password reset, and sign-out. Auth HTTP lives
- * beside `/api`.
+ * sign-in, verification notice, password reset, sign-out, and Deletion. Auth
+ * HTTP lives beside `/api`.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -42,6 +42,8 @@ export interface AccountGateInjected {
   signIn: (email: string, password: string) => Promise<AuthResult>
   /** POST `/auth/sign-out`. */
   signOut: () => Promise<AuthResult>
+  /** POST `/auth/delete`. */
+  deleteAccount: () => Promise<AuthResult>
   /** POST `/auth/resend-verification`. */
   resend: (email: string) => Promise<AuthResult>
   /** POST `/auth/request-password-reset`. */
@@ -74,6 +76,7 @@ export function apply(ctx: ClientContext): void {
       register: (email, password) => postJson('/auth/register', { email, password }),
       signIn: (email, password) => postJson('/auth/sign-in', { email, password }),
       signOut: () => postJson('/auth/sign-out', {}),
+      deleteAccount: () => postJson('/auth/delete', {}),
       resend: email => postJson('/auth/resend-verification', { email }),
       requestPasswordReset: email => postJson('/auth/request-password-reset', { email }),
       resetPassword: (token, password) => postJson('/auth/reset-password', { token, password }),

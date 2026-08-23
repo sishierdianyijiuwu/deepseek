@@ -47,6 +47,7 @@ describe('ui-account browser apply', () => {
     await expect(injected.register('a@b.c', 'pw')).resolves.toEqual({ ok: true })
     await expect(injected.signIn('a@b.c', 'pw')).resolves.toEqual({ ok: true })
     await expect(injected.signOut()).resolves.toEqual({ ok: true })
+    await expect(injected.deleteAccount()).resolves.toEqual({ ok: true })
     await expect(injected.resend('a@b.c')).resolves.toEqual({ ok: true })
     await expect(injected.requestPasswordReset('a@b.c')).resolves.toEqual({ ok: true })
     await expect(injected.resetPassword('tok', 'pw')).resolves.toEqual({ ok: true })

@@ -9,7 +9,7 @@
  * @module @deepseek-ai/dsh-credentials-account
  */
 
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -204,6 +204,24 @@ export class AccountCredentialProvider extends CredentialProvider {
         await this.persist(account, doc, filename)
         this.notifyRecordUpdated(key)
       }, { waitMs: DOCUMENT_LOCK_WAIT_MS })
+    })
+  }
+
+  /**
+   * Delete the Account document and drop its cache entry. Missing files are a no-op.
+   * @param accountId - Account whose `$DSH_HOME/credentials/<accountId>.json` is erased.
+   */
+  override async eraseOwned(accountId: string): Promise<void> {
+    if (!ACCOUNT_FILE_PATTERN.test(accountId)) return
+    const account = accountId as AccountId
+    await this.enqueue(async () => {
+      const filename = filenameFor(this.spec.directory, account)
+      try {
+        await unlink(filename)
+      } catch (error) {
+        if (!isENOENT(error)) throw error
+      }
+      this.cache.delete(account)
     })
   }
 

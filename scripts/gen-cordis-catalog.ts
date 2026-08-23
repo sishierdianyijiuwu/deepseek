@@ -635,6 +635,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   SignInLookup: 'Sign-in session lookup is owned by packages/account/account/README.md',
   ResetPasswordResult: 'password-reset outcome is owned by packages/account/account/README.md',
   BanResult: 'Ban outcome is owned by packages/account/account/README.md',
+  DeleteResult: 'Deletion outcome is owned by packages/account/account/README.md',
   AccountId: 'Account identity is owned by packages/account/account/README.md',
   AccountLookup: 'Operator Account lookup is owned by packages/account/account/README.md',
   OperatorAuditRecord: 'Operator-access audit row is owned by packages/account/account/README.md',

@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type SessionEvent, type SessionOwnerId } from '@deepseek-ai/dsh-session'
 import SessionPersistenceSqlite, {
   DEFAULT_BUSY_TIMEOUT_MS,
   SCHEMA_VERSION,
@@ -21,6 +21,7 @@ import {
 } from '../../session-persistence/tests/coordinator-contract.ts'
 import {
   meta,
+  oneTurnLog,
   runPersistenceContract,
 } from '../../session-persistence/tests/contract.ts'
 import { MAX_PACKED_DATA_BYTES } from '../src/codec.ts'
@@ -273,6 +274,22 @@ describe('SessionPersistenceSqlite physical packing', () => {
     expect(db.prepare(testSql('count-packed-events')).get())
       .toEqual({ count: 1 })
     db.close()
+  })
+
+  it('deleteOwned removes only sessions whose header owner matches', async () => {
+    const path = await freshDbPath()
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionPersistenceSqlite, { path })
+    const owned = { ...meta('owned'), owner: 'account-a' as SessionOwnerId }
+    const other = { ...meta('other'), owner: 'account-b' as SessionOwnerId }
+    await ctx.sessionPersistence.create(owned)
+    await ctx.sessionPersistence.append(owned.id, oneTurnLog())
+    await ctx.sessionPersistence.create(other)
+    await ctx.sessionPersistence.append(other.id, oneTurnLog())
+    await ctx.sessionPersistence.deleteOwned('account-a')
+    expect((await ctx.sessionPersistence.list()).map(header => header.id)).toEqual([other.id])
+    await ctx.fiber.dispose()
   })
 
   it('packs each append once without rewriting earlier rows and seeks inside packed rows', async () => {

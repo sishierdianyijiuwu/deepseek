@@ -3,7 +3,7 @@
  * Assertions observe HTTP status and RPC bodies — not SQL rows or files.
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -318,6 +318,34 @@ describe('Account-scoped Credentials over HTTP', () => {
       value: 'secret-b',
     })
     expect(credentialView((await rpc(harness, jarA, 'credentials.describe', {
+      refs: ['DEEPSEEK_API_KEY'],
+    })).body, 'DEEPSEEK_API_KEY')).toMatchObject({ configured: true, source: 'account' })
+  })
+
+  it('Deletion erases that Account Credential document and leaves others', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const password = 'correct-horse'
+    const jarA = await signInAccount(harness, 'gone@example.com', password)
+    const jarB = await signInAccount(harness, 'keep@example.com', password)
+    expect((await rpc(harness, jarA, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY', value: 'secret-a',
+    })).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
+    expect((await rpc(harness, jarB, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY', value: 'secret-b',
+    })).body as { result?: { ok?: boolean } }).toMatchObject({ result: { ok: true } })
+    const created = await rpc(harness, jarA, 'session.create', {})
+    const sessionId = (created.body as { result?: { value?: { sessionId: string } } }).result?.value?.sessionId
+    const owner = context!.sessions.get(sessionId as never)?.header.owner
+    expect(owner).toEqual(expect.any(String))
+    const goneFile = join(root!, 'credentials', `${owner!}.json`)
+    await stat(goneFile)
+    expect((await raw(harness, jarA, '/auth/delete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })).status).toBe(200)
+    await expect(stat(goneFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(credentialView((await rpc(harness, jarB, 'credentials.describe', {
       refs: ['DEEPSEEK_API_KEY'],
     })).body, 'DEEPSEEK_API_KEY')).toMatchObject({ configured: true, source: 'account' })
   })

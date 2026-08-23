@@ -137,7 +137,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.cloudWorkspaces` — `CloudWorkspaces`
 
-Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.
+Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or Import a public HTTPS git remote into a new slot namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.
 
 ```ts cordis-catalog
 /**
@@ -155,6 +155,23 @@ owns(accountId: AccountId, workspaceId: WorkspaceId): boolean
  * @returns the registry Workspace after the PG row and directory exist.
  */
 async createEmpty(accountId: AccountId, title?: string): Promise<Workspace>
+
+/**
+ * Import a public HTTPS git remote into a new owned Workspace slot.
+ * Clone runs in an unlisted directory under the Account prefix; the
+ * registry row is created only after clone and the 1 GiB check succeed.
+ * Private, credential-bearing, and non-HTTPS remotes throw
+ * {@link CloudWorkspaceImportUrlError} before `git` runs. A fourth
+ * Workspace throws {@link CloudWorkspaceLimitError}. A tree past 1 GiB
+ * throws {@link CloudWorkspaceQuotaError}. Clone failure throws
+ * {@link CloudWorkspaceImportError}. Failed ingest does not keep a slot.
+ * @param accountId - owning Account.
+ * @param gitUrl - public HTTPS git URL.
+ * @param title - display title; omitted or blank uses the repo basename.
+ * @param signal - optional abort from the unary RPC.
+ * @returns the registry Workspace after clone and the size check.
+ */
+async importPublicGit( accountId: AccountId, gitUrl: string, title?: string, signal?: AbortSignal, ): Promise<Workspace>
 
 /**
  * Registry Workspaces this Account owns, in durable registry order.
@@ -179,6 +196,13 @@ getOwned(accountId: AccountId, workspaceId: WorkspaceId): Workspace | undefined
  * @returns true when a row was deleted.
  */
 async deleteOwned(accountId: AccountId, workspaceId: WorkspaceId): Promise<boolean>
+
+/**
+ * Delete every Workspace this Account owns, then remove the Account prefix
+ * directory. A planted symlink at that prefix is unlinked rather than followed.
+ * @param accountId - owning Account.
+ */
+async deleteAllOwned(accountId: AccountId): Promise<void>
 
 /**
  * Write a file into an owned Workspace, refusing a tree past 1 GiB.

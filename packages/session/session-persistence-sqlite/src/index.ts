@@ -129,6 +129,14 @@ export class SqliteSessionPersistence extends SessionPersistence {
   listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     return this.store.listSnapshots(signal)
   }
+
+  /**
+   * Delete SQLite rows whose header `owner` matches.
+   * @param owner - Account id stored as `SessionHeader.owner`.
+   */
+  override deleteOwned(owner: string): Promise<void> {
+    return this.store.deleteOwned(owner)
+  }
 }
 
 export default SqliteSessionPersistence

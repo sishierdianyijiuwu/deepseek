@@ -767,3 +767,27 @@ describe('operator Ban and freeze', () => {
       .toMatchObject({ ok: false, error: { code: 'registration_frozen' } })
   })
 })
+
+describe('Deletion', () => {
+  it('lets a signed-in Account erase itself so the email can register again', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    const email = 'gone@example.com'
+    const password = 'correct-horse'
+    expect((await post(harness, '/auth/register', { email, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email, password })).json).toEqual({ ok: true })
+    expect((await post(harness, '/auth/delete', {})).json).toEqual({ ok: true })
+    expect(harness.jar.hasSignIn()).toBe(false)
+    expect((await request(harness, '/auth/me')).json).toEqual({ ok: true, signedIn: false })
+    expect((await post(harness, '/auth/register', { email, password })).json).toEqual({ ok: true })
+    await request(harness, `/verify?token=${tokenFromMailbox()}`)
+    expect((await post(harness, '/auth/sign-in', { email, password })).json).toEqual({ ok: true })
+  })
+
+  it('refuses Deletion without a live Sign-in session', { timeout: 60_000 }, async () => {
+    const harness = await boot()
+    expect((await post(harness, '/auth/delete', {})).json)
+      .toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect((await request(harness, '/auth/delete', { method: 'GET' })).status).toBe(405)
+  })
+})

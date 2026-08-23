@@ -12,6 +12,7 @@ import {
   SIGN_IN_COOKIE,
   type AccountLookup,
   type BanResult,
+  type DeleteResult,
   type OperatorAuditRecord,
   type OperatorAuditWrite,
   type RegisterResult,
@@ -63,6 +64,9 @@ class FakeAccounts extends Accounts {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override deleteAccount(): Promise<DeleteResult> {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override setRegistrationFrozen(): Promise<void> {

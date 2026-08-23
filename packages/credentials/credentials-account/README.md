@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 Account-scoped [credentials](../credentials/README.md) provider for the hosted control plane. Each signed-in Account has its own `$DSH_HOME/credentials/<accountId>.json` document. The process environment is not a layer: a platform key would be shared across Accounts. `resolve` is per call, so Settings → Models writes take effect on the next LLM request without a process restart.
 
-Writes (`set` / `unset` / `modifyRecord` / `deleteRecord`) require `currentAccountId()` from the Sign-in session. A call with no bound Account describes the reference as unconfigured and unwritable, and `resolve` returns `undefined` rather than another Account's secret.
+Writes (`set` / `unset` / `modifyRecord` / `deleteRecord`) require `currentAccountId()` from the Sign-in session. A call with no bound Account describes the reference as unconfigured and unwritable, and `resolve` returns `undefined` rather than another Account's secret. `eraseOwned(accountId)` deletes that Account's document without a bound Sign-in session, so Account Deletion can drop the file after Sign-in sessions are already gone.
 
 ## Config
 

@@ -21,10 +21,19 @@
       "path": "../account"
     },
     {
+      "path": "../../credentials/credentials"
+    },
+    {
       "path": "../../host/webserver"
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../session/session-persistence"
+    },
+    {
+      "path": "../../workspace/workspace-cloud"
     }
   ]
 }

@@ -287,6 +287,20 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect((await ctx.sessionPersistence.list()).map(h => h.id)).toContain(m.id)
   })
 
+  it('deleteOwned removes only sessions whose header owner matches', async () => {
+    const owned = { ...meta('owned', '/work'), owner: 'account-a' as SessionOwnerId }
+    const other = { ...meta('other', '/work'), owner: 'account-b' as SessionOwnerId }
+    await ctx.sessionPersistence.create(owned)
+    await ctx.sessionPersistence.append(owned.id, oneTurnLog())
+    await ctx.sessionPersistence.create(other)
+    await ctx.sessionPersistence.append(other.id, oneTurnLog())
+    await ctx.sessionPersistence.deleteOwned('account-a')
+    expect((await ctx.sessionPersistence.list()).map(h => h.id)).toEqual([other.id])
+    await expect(stat(rawLogPath(root, '/work', owned.id))).rejects.toThrow()
+    expect((await stat(rawLogPath(root, '/work', other.id))).isFile()).toBe(true)
+    await ctx.sessionPersistence.deleteOwned('account-a')
+  })
+
   it('readRaw returns the stored artifact text verbatim with its original filename', async () => {
     const m = meta('raw-read', '/work')
     await ctx.sessionPersistence.create(m)

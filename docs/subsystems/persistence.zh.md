@@ -385,6 +385,14 @@ abstract list(signal?: AbortSignal): Promise<SessionHeader[]>
  * @returns one header and opaque revision per materialized session without loading full logs.
  */
 abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
+
+/**
+ * Erase every persisted Session whose header `owner` is `owner`. JSONL and
+ * SQLite providers delete those logs; backends that do not store Account-owned
+ * logs no-op. Unknown owners are a no-op.
+ * @param _owner - Account id stored as `SessionHeader.owner`.
+ */
+deleteOwned(_owner: string): Promise<void>
 ```
 
 Types: [SessionEvent](session.zh.md) · [SessionId](core.zh.md)

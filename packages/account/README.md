@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-Hosted Account identity: a person registers with email and password, verifies the email, signs in, and can reset the Password. An Operator (configured email list) can Ban an Account and freeze public registration. This group does not reuse [`identity/`](../identity/README.md) (anonymous telemetry) or [`credentials/`](../credentials/README.md) (model-provider secrets).
+Hosted Account identity: a person registers with email and password, verifies the email, signs in, and can reset the Password or delete the Account. An Operator (configured email list) can Ban an Account and freeze public registration. This group does not reuse [`identity/`](../identity/README.md) (anonymous telemetry) or [`credentials/`](../credentials/README.md) (model-provider secrets).
 
 | Package | Role | ctx key |
 |---|---|---|

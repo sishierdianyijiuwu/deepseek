@@ -144,6 +144,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: '`{ ok: true }` when the Account exists, or `not_found`.',
       },
       {
+        signature: 'abstract deleteAccount(id: AccountId): Promise<DeleteResult>',
+        description: 'Erase this Account row and CASCADE Sign-in sessions, verification tokens, and password-reset tokens. Does not Ban. The HTTP Consumer erases Sessions, Workspaces, and Credentials after this returns. Unknown ids are `not_found`.',
+        parameters: [{ name: 'id', description: 'opaque Account id of the signed-in caller.' }],
+        returns: '`{ ok: true }` when the row was deleted, or `not_found`.',
+      },
+      {
         signature: 'abstract setRegistrationFrozen(frozen: boolean): Promise<void>',
         description: 'Freeze or unfreeze public registration. Frozen `register` returns `registration_frozen` and does not insert a row.',
         parameters: [{ name: 'frozen', description: 'whether new registration is refused.' }],
@@ -640,7 +646,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'cloudWorkspaces',
     summary: 'Cloud Workspace store (`ctx.cloudWorkspaces`).',
-    description: 'Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.',
+    description: 'Cloud Workspace store (`ctx.cloudWorkspaces`). Create empty directories or Import a public HTTPS git remote into a new slot namespaced by Account, persist metadata in PostgreSQL, and enforce the v1 count and size caps. The Host workspace registry still owns session membership for those directories. PostgreSQL is the ownership and slot source of truth: startup adopts each row into the registry by path so a wiped KV store does not hide live directories.',
     methods: [
       {
         signature: 'owns(accountId: AccountId, workspaceId: WorkspaceId): boolean',
@@ -653,6 +659,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Create an empty Workspace directory for `accountId`.',
         parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'title', description: 'display title; omitted or blank uses {@link DEFAULT_WORKSPACE_TITLE}.' }],
         returns: 'the registry Workspace after the PG row and directory exist.',
+      },
+      {
+        signature: 'async importPublicGit( accountId: AccountId, gitUrl: string, title?: string, signal?: AbortSignal, ): Promise<Workspace>',
+        description: 'Import a public HTTPS git remote into a new owned Workspace slot. Clone runs in an unlisted directory under the Account prefix; the registry row is created only after clone and the 1 GiB check succeed. Private, credential-bearing, and non-HTTPS remotes throw CloudWorkspaceImportUrlError before `git` runs. A fourth Workspace throws CloudWorkspaceLimitError. A tree past 1 GiB throws CloudWorkspaceQuotaError. Clone failure throws CloudWorkspaceImportError. Failed ingest does not keep a slot.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'gitUrl', description: 'public HTTPS git URL.' }, { name: 'title', description: 'display title; omitted or blank uses the repo basename.' }, { name: 'signal', description: 'optional abort from the unary RPC.' }],
+        returns: 'the registry Workspace after clone and the size check.',
       },
       {
         signature: 'listOwned(accountId: AccountId): Workspace[]',
@@ -671,6 +683,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Delete an owned Workspace: PostgreSQL row, registry registration, and durable files. Waits for in-flight `writeFile` calls on this id, then removes the tree.',
         parameters: [{ name: 'accountId', description: 'owning Account.' }, { name: 'workspaceId', description: 'Host Workspace id.' }],
         returns: 'true when a row was deleted.',
+      },
+      {
+        signature: 'async deleteAllOwned(accountId: AccountId): Promise<void>',
+        description: 'Delete every Workspace this Account owns, then remove the Account prefix directory. A planted symlink at that prefix is unlinked rather than followed.',
+        parameters: [{ name: 'accountId', description: 'owning Account.' }],
       },
       {
         signature: 'async writeFile( accountId: AccountId, workspaceId: WorkspaceId, relativePath: string, data: Uint8Array, ): Promise<void>',
@@ -838,6 +855,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract deleteRecord(key: CredentialKey): Promise<void>',
         description: 'Remove one record; removing an absent record is a no-op.',
         parameters: [{ name: 'key', description: 'the record to remove.' }],
+      },
+      {
+        signature: 'eraseOwned(_accountId: string): Promise<void>',
+        description: 'Erase every stored secret for one Account. Hosted Account-scoped providers delete that Account\'s document; process-env and file providers no-op. Unknown ids are a no-op. Does not require a bound Sign-in Account.',
+        parameters: [{ name: '_accountId', description: 'Account whose stored secrets should disappear.' }],
       },
     ],
   },
@@ -1420,6 +1442,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'List materialized sessions with cheap per-log change tokens.\n\nRepeated observations of an unchanged log return the same revision. A successful mutating load repair changes the next listed revision. Revisions also distinguish independently backed stores so backend-local counters cannot compare equal across different persistence sources.',
         parameters: [{ name: 'signal', description: 'optional cancellation for backend snapshot-listing work.' }],
         returns: 'one header and opaque revision per materialized session without loading full logs.',
+      },
+      {
+        signature: 'deleteOwned(_owner: string): Promise<void>',
+        description: 'Erase every persisted Session whose header `owner` is `owner`. JSONL and SQLite providers delete those logs; backends that do not store Account-owned logs no-op. Unknown owners are a no-op.',
+        parameters: [{ name: '_owner', description: 'Account id stored as `SessionHeader.owner`.' }],
       },
     ],
   },
@@ -3414,6 +3441,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type CredentialRef = Branded<\'CredentialRef\'>;',
   },
   {
+    name: 'DeleteResult',
+    declaration: 'export type DeleteResult = {\n    ok: true;\n} | {\n    ok: false;\n    error: \'not_found\';\n};',
+  },
+  {
     name: 'DiffCallView',
     declaration: 'export interface DiffCallView {\n    card: \'diff\';\n    title: string;\n    diffs: FileDiff[];\n    locations?: FileLocation[];\n}',
   },
@@ -4187,7 +4218,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RpcErrorDetailsMap',
-    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'workspace-required\': {};\n    \'workspace-limit\': {\n        max: number;\n    };\n    \'workspace-quota-exceeded\': {\n        maxBytes: number;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset: string;\n    };\n    \'agent-preset-conflict\': {\n        sessionId:  /* …truncated — full shape in source */',
+    declaration: 'export interface RpcErrorDetailsMap {\n    \'bad-request\': {\n        issues: ZodIssue[];\n    };\n    \'cancelled\': {};\n    \'session-not-found\': {\n        sessionId: SessionId;\n    };\n    \'model-unavailable\': {\n        provider: string;\n        model: string;\n    };\n    \'session-conflict\': {\n        sessionId: SessionId;\n        requestedCwd: string;\n        existingCwd?: string;\n    };\n    \'invalid-time-zone\': {\n        value: string;\n    };\n    \'workspace-attach-failed\': {\n        sessionId: SessionId;\n        workspaceId: string;\n    };\n    \'workspace-not-found\': {\n        workspaceId: string;\n    };\n    \'workspace-invalid-path\': {\n        path: string;\n    };\n    \'workspace-name-conflict\': {\n        name: string;\n    };\n    \'workspace-move-invalid\': {\n        workspaceId: string;\n        sessionId: SessionId;\n        beforeSessionId?: SessionId;\n    };\n    \'workspace-required\': {};\n    \'workspace-limit\': {\n        max: number;\n    };\n    \'workspace-quota-exceeded\': {\n        maxBytes: number;\n    };\n    \'workspace-import-refused\': {\n        gitUrl: string;\n    };\n    \'directory-unreadable\': {\n        path: string;\n    };\n    \'directory-exists\': {\n        path: string;\n    };\n    \'directory-create-failed\': {\n        path: string;\n    };\n    \'directory-picker-unavailable\': {\n        capability: string;\n    };\n    \'agent-preset-read-only\': {\n        agentPreset: string;\n        reason: string;\n    };\n    \'agent-preset-locked\': {\n        sessionId: SessionId;\n        agentPreset:  /* …truncated — full shape in source */',
   },
   {
     name: 'RpcId',

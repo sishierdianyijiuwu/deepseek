@@ -27,6 +27,10 @@ export const zh = {
   'reset.invalid': '重置链接无效或已过期，请重新发送。',
   'signedIn.as': '已登录 {email}',
   'signOut': '退出登录',
+  'deleteAccount': '删除 Account',
+  'delete.confirm': '将永久删除此 Account 及其 Session、Workspace 和 Credential。无法撤销。',
+  'delete.yes': '确认删除',
+  'delete.cancel': '取消',
   'busy': '处理中…',
   'error.network': '无法连接到服务器',
 } satisfies Record<string, string>
@@ -61,6 +65,10 @@ export const en = {
   'reset.invalid': 'That reset link is invalid or expired. Request a new one.',
   'signedIn.as': 'Signed in as {email}',
   'signOut': 'Sign out',
+  'deleteAccount': 'Delete Account',
+  'delete.confirm': 'This permanently deletes this Account and its Sessions, Workspaces, and Credentials. It cannot be undone.',
+  'delete.yes': 'Delete',
+  'delete.cancel': 'Cancel',
   'busy': 'Working…',
   'error.network': 'Could not reach the server',
 } satisfies Record<AccountKey, string>

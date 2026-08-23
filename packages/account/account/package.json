@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-account",
-  "description": "Account capability Service Definition (ctx.accounts): register, verify email, sign in, sign out, password reset, Ban, registration freeze",
+  "description": "Account capability Service Definition (ctx.accounts): register, verify email, sign in, sign out, password reset, Ban, Deletion, registration freeze",
   "version": "0.1.1-rc.2",
   "publishConfig": {
     "access": "public"

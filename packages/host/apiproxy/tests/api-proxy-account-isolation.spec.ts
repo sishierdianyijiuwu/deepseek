@@ -10,6 +10,7 @@ import { Accounts, accountId, runWithAccount, runWithOperatorAccess } from '@dee
 import type {
   AccountLookup,
   BanResult,
+  DeleteResult,
   OperatorAuditRecord,
   OperatorAuditWrite,
   RegisterResult,
@@ -67,6 +68,9 @@ class FakeAccounts extends Accounts {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override liftBan(): Promise<BanResult> {
+    return Promise.resolve({ ok: false, error: 'not_found' })
+  }
+  override deleteAccount(): Promise<DeleteResult> {
     return Promise.resolve({ ok: false, error: 'not_found' })
   }
   override setRegistrationFrozen(): Promise<void> {

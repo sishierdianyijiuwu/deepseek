@@ -448,6 +448,18 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return (await this.listArtifacts(signal)).map(artifact => artifact.header)
   }
 
+  /**
+   * Remove each session directory whose header `owner` matches.
+   * @param owner - Account id stored as `SessionHeader.owner`.
+   */
+  override async deleteOwned(owner: string): Promise<void> {
+    const headers = await this.list()
+    for (const header of headers) {
+      if (header.owner !== owner) continue
+      await rm(dirname(this.locate(header).path), { recursive: true, force: true })
+    }
+  }
+
   /** List metadata plus a stat-derived identity for each append-only log. */
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     const snapshots: SessionPersistenceSnapshot[] = []
