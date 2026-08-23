@@ -87,6 +87,15 @@ class FakeAccounts extends Accounts {
   override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
     return Promise.resolve([])
   }
+  override beginExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override endExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override executingWorldUsedMs(): Promise<number> {
+    return Promise.resolve(0)
+  }
 }
 
 /** Structural webServer fake recording both route registries. */

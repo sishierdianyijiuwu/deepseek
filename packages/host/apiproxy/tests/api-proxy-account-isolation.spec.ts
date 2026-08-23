@@ -92,6 +92,15 @@ class FakeAccounts extends Accounts {
   override listOperatorAccess(): Promise<OperatorAuditRecord[]> {
     return Promise.resolve(auditLog.map((entry, index) => ({ id: `audit-${String(index + 1)}`, ...entry })))
   }
+  override beginExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override endExecutingWorld(): Promise<void> {
+    return Promise.resolve()
+  }
+  override executingWorldUsedMs(): Promise<number> {
+    return Promise.resolve(0)
+  }
 }
 
 async function harness(): Promise<{ ctx: Context; api: ApiProxy }> {

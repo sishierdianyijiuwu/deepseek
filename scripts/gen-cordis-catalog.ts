@@ -622,6 +622,8 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   RequestRunId: 'dynamic-package payload contract is owned by packages/extensions/cordis-host-runner/src/types.ts',
   RpcReceipt: 'carrier-layer receipt is owned by packages/host/apiproxy/src/api/rpc.ts',
   Sandbox: 'external E2B SDK handle is owned by packages/e2b/e2b/README.md',
+  ExecutingSessionStart: 'Executing Session start result is owned by packages/e2b/e2b/README.md',
+  ExecutionWorld: 'execution-world filesystem is owned by packages/workspace/workspace-cloud/README.md',
   SessionForkSource: 'service-local fork input is owned by packages/core/session/src/index.ts',
   SubagentRunEndInfo: 'event payload contract is owned by packages/subagent/subagent/src/types.ts',
   SubagentRunInfo: 'event payload contract is owned by packages/subagent/subagent/src/types.ts',

@@ -22,10 +22,16 @@
 export interface Config {
   /** Set the cookie Secure flag (HTTPS reverse-proxy deployments). */
   cookieSecure?: boolean
+  /**
+   * When true, Deletion fails unless `cloudWorkspaces`, `credentials`, and
+   * `sessionPersistence` are composed. The hosted patch sets this; auth-only
+   * tests leave it false so a row-only composition still deletes the Account.
+   */
+  requireOwnedErase?: boolean
 }
 ```
 
-来源：[`packages/account/account-http/src/index.ts:19`](../packages/account/account-http/src/index.ts)
+来源：[`packages/account/account-http/src/index.ts:22`](../packages/account/account-http/src/index.ts)
 
 <a id="deepseek-aidsh-account-postgres"></a>
 
@@ -59,7 +65,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/account/account-postgres/src/index.ts:44`](../packages/account/account-postgres/src/index.ts)
+来源：[`packages/account/account-postgres/src/index.ts:51`](../packages/account/account-postgres/src/index.ts)
 
 <a id="deepseek-aidsh-acp"></a>
 
@@ -470,7 +476,7 @@ export interface ConnectionConfig {
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:62`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -656,10 +662,20 @@ export interface Config {
   cwd?: string
   /** E2B sandbox lifetime in milliseconds; expiry always deletes the sandbox. */
   timeoutMs?: number
+  /**
+   * When true, sandboxes are created per Executing Session (one per Account)
+   * rather than one eager process-wide sandbox. Hosted control plane sets this.
+   */
+  perExecutingSession?: boolean
+  /**
+   * Minutes of sandbox-running time each Account may use per UTC day.
+   * Hosted `perExecutingSession` enforces this when `ctx.accounts` is composed.
+   */
+  dailyCapMinutes?: number
 }
 ```
 
-来源：[`packages/e2b/e2b/src/index.ts:43`](../packages/e2b/e2b/src/index.ts)
+来源：[`packages/e2b/e2b/src/index.ts:46`](../packages/e2b/e2b/src/index.ts)
 
 <a id="deepseek-aidsh-experimental-agent-team"></a>
 
@@ -863,7 +879,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-host-apiproxy`
 
-需要：`agentDefaultModel` · `agents` · `attachments` · `directoryPicker` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
+需要：`agentDefaultModel` · `agents` · `attachments` · `llm` · `sessions` · `subagents` · `sessionQuery` · `tools` · `userQuestions` · `workspaceRegistry`
 
 ```ts config-catalog
 /** Gateway plugin configuration. */
@@ -3313,6 +3329,37 @@ export interface Config {
 ```
 
 来源：[`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
+
+<a id="deepseek-aidsh-workspace-cloud"></a>
+
+## `@deepseek-ai/dsh-workspace-cloud`
+
+需要：`workspaceRegistry`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /**
+   * PostgreSQL URL (`postgres://…` / `postgresql://…`), or `pglite:` for an
+   * in-process PostgreSQL engine used by tests.
+   */
+  url: string
+  /** Control-plane directory that holds per-Account Workspace trees. */
+  root: string
+  /**
+   * Wall-clock bound for one Import clone. Defaults to
+   * {@link IMPORT_CLONE_TIMEOUT_MS}.
+   */
+  importTimeoutMs?: number
+  /**
+   * Skip TLS verify on Import clone. Default false; tests set true for a
+   * self-signed local git-http-backend. Production must leave this false.
+   */
+  importTlsInsecure?: boolean
+}
+```
+
+来源：[`packages/workspace/workspace-cloud/src/index.ts:89`](../packages/workspace/workspace-cloud/src/index.ts)
 
 ## 无配置的可加载插件
 

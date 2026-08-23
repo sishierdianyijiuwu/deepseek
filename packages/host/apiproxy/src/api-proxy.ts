@@ -1234,6 +1234,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     }
   }
 
+  function nextUtcDayStartMs(at: number): number {
+    const day = new Date(at).toISOString().slice(0, 10)
+    return Date.parse(`${day}T00:00:00.000Z`) + 86_400_000
+  }
+
+  async function stopExecutingWorld(
+    account: AccountId,
+    sessionId: SessionId,
+    opts?: { skipIf?: () => boolean },
+  ): Promise<void> {
+    const e2b = ctx.get('e2b')
+    /* v8 ignore next 2 -- Executing Session start already required e2b. */
+    if (e2b === undefined) return
+    const live = e2b.executingSandbox(account)
+    await e2b.stopExecutingSession(account, sessionId, opts)
+    if (e2b.executingSandbox(account) === live) return
+    await ctx.get('accounts')?.endExecutingWorld(account, Date.now())
+  }
+
   /**
    * Start the Account's E2B Executing Session and hydrate the durable Workspace.
    * Extra prompts of the same family reuse the sandbox. A second family is refused.
@@ -1260,6 +1279,20 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }),
       }
     }
+    const now = Date.now()
+    const capMinutes = e2b.dailyCapMinutes
+    if (e2b.executingSessionId(account) === undefined) {
+      const used = await ctx.get('accounts')?.executingWorldUsedMs(account, now) ?? 0
+      if (used >= capMinutes * 60_000) {
+        return {
+          refused: err(request, {
+            code: 'e2b-cap-exhausted',
+            message: `this Account has used its ${String(capMinutes)} minutes of execution-world time for this UTC day`,
+            details: { capMinutes, resetsAt: nextUtcDayStartMs(now) },
+          }),
+        }
+      }
+    }
     addExecutingHold(rootId)
     let sandbox: ExecutingBind['sandbox']
     let reused: boolean
@@ -1281,21 +1314,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       throw error
     }
     try {
-      if (!reused) await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+      if (!reused) {
+        await ctx.get('accounts')?.beginExecutingWorld(account, Date.now())
+        await cloud.hydrateInto(account, workspace.id, sandbox as ExecutionWorld, e2b.cwd)
+      }
     } catch (error: unknown) {
       releaseExecutingHold(rootId)
-      await e2b.stopExecutingSession(account, rootId)
+      await stopExecutingWorld(account, rootId)
       throw error
     }
     return { bind: { account, rootId, workspace, sandbox, reused } }
   }
 
   async function abandonExecutingWorld(bind: ExecutingBind): Promise<void> {
-    const e2b = ctx.get('e2b')
     releaseExecutingHold(bind.rootId)
-    if (e2b === undefined) return
     if (bind.reused || executingCopyBack.has(bind.rootId) || familyBusy(bind.rootId)) return
-    await e2b.stopExecutingSession(bind.account, bind.rootId, {
+    await stopExecutingWorld(bind.account, bind.rootId, {
       skipIf: () => familyBusy(bind.rootId),
     })
   }
@@ -1335,7 +1369,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           if (familyBusy(bind.rootId)) continue
           if (e2b.executingSandbox(bind.account) !== bind.sandbox) return
-          await e2b.stopExecutingSession(bind.account, bind.rootId, {
+          await stopExecutingWorld(bind.account, bind.rootId, {
             skipIf: () => familyBusy(bind.rootId),
           })
           if (familyBusy(bind.rootId)) continue

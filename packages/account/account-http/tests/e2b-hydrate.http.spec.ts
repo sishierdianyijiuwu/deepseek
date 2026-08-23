@@ -1,14 +1,14 @@
 /**
  * REAL-composition coverage: Sign-in cookie jars against Host `/api` with the
- * E2B SDK faked. Hydrate, copy-back, the 1 GiB cap, and one Executing Session
- * are observed as HTTP status and RPC bodies.
+ * E2B SDK faked. Hydrate, copy-back, the 1 GiB cap, one Executing Session,
+ * and the daily E2B minute cap are observed as HTTP status and RPC bodies.
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -101,6 +101,7 @@ const mailbox: MailMessage[] = []
 let currentWorld: ReturnType<typeof createRemoteWorld> | undefined
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   const e2b = context?.get('e2b')
   if (e2b instanceof FakeE2B) {
     e2b.startEnqueued?.resolve(undefined)
@@ -152,10 +153,15 @@ class FakeCredentials extends Service {
   hasStoredSecret(): Promise<boolean> {
     return Promise.resolve(true)
   }
+
+  set(): Promise<void> {
+    return Promise.resolve()
+  }
 }
 
 class FakeE2B extends Service {
   readonly perExecutingSession = true
+  readonly dailyCapMinutes = 60
   readonly cwd = '/home/user/workspace'
   private readonly accountSlots = new Map<AccountId, { sessionId: SessionId; world: ReturnType<typeof createRemoteWorld> }>()
   private chain: Promise<unknown> = Promise.resolve()
@@ -229,6 +235,10 @@ class FakeE2B extends Service {
   killLiveSlots(): void {
     for (const existing of this.accountSlots.values()) existing.world.killed = true
     this.accountSlots.clear()
+  }
+
+  hasLiveSlot(): boolean {
+    return this.accountSlots.size > 0
   }
 }
 
@@ -660,5 +670,103 @@ describe('E2B Executing Session over HTTP', () => {
     }).result?.value?.events ?? []
     expect(events.some(entry => entry.event?.type === 'workspace/copy-back-failed')).toBe(false)
     if (sessionId !== undefined) idleGates.get(sessionId)?.resolve(undefined)
+  })
+
+  it('refuses a new Executing Session after 60 minutes and still allows sign-in, history, and Credentials', {
+    timeout: 60_000,
+  }, async () => {
+    let nowMs = Date.parse('2026-03-01T22:00:00.000Z')
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs)
+    const harness = await boot()
+    const password = 'correct-horse'
+    const email = 'daily-cap@example.com'
+    const jar = await signInAccount(harness, email, password)
+
+    const workspace = await rpc(harness, jar, 'workspace.create', { title: 'Cap' })
+    const workspaceId = (workspace.body as {
+      result?: { value?: { workspace?: { workspaceId?: string } } }
+    }).result?.value?.workspace?.workspaceId
+    expect((await rpc(harness, jar, 'workspace.write', {
+      workspaceId, path: 'note.txt', data: 'hello',
+    })).status).toBe(200)
+    const sessionA = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionAId = (sessionA.body as { result?: { value?: { sessionId?: string } } })
+      .result?.value?.sessionId
+    const sessionB = await rpc(harness, jar, 'session.create', { workspaceId })
+    const sessionBId = (sessionB.body as { result?: { value?: { sessionId?: string } } })
+      .result?.value?.sessionId
+    expect(sessionAId).toEqual(expect.any(String))
+    expect(sessionBId).toEqual(expect.any(String))
+
+    const historyIdle = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyIdle.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialIdle = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-before',
+    })
+    expect((credentialIdle.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const promptA = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionAId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'run' }],
+    })
+    expect((promptA.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const historyLive = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyLive.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialLive = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-during',
+    })
+    expect((credentialLive.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs += 60 * 60 * 1000
+    if (sessionAId !== undefined) idleGates.get(sessionAId)?.resolve(undefined)
+    const e2b = context?.get('e2b')
+    if (!(e2b instanceof FakeE2B)) throw new Error('fake e2b missing')
+    await expect.poll(() => e2b.hasLiveSlot()).toBe(false)
+
+    const exhausted = await rpc(harness, jar, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'again' }],
+    })
+    expect(rpcError(exhausted.body)).toBe('e2b-cap-exhausted')
+    const exhaustedDetails = (exhausted.body as {
+      result?: { error?: { details?: { capMinutes?: number; resetsAt?: number } } }
+    }).result?.error?.details
+    expect(exhaustedDetails?.capMinutes).toBe(60)
+    expect(exhaustedDetails?.resetsAt).toBe(Date.parse('2026-03-02T00:00:00.000Z'))
+
+    const historyAfter = await rpc(harness, jar, 'session.history', { sessionId: sessionAId })
+    expect((historyAfter.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    const credentialAfter = await rpc(harness, jar, 'credentials.set', {
+      ref: 'DEEPSEEK_API_KEY',
+      value: 'secret-after',
+    })
+    expect((credentialAfter.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    const signedOut = await raw(harness, jar, '/auth/sign-out', { method: 'POST' })
+    expect(signedOut.status).toBe(200)
+    const jarAgain = new CookieJar()
+    const signedIn = await raw(harness, jarAgain, '/auth/sign-in', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })
+    expect(signedIn.status).toBe(200)
+    expect(jarAgain.header()).toContain(SIGN_IN_COOKIE)
+    const historySignedIn = await rpc(harness, jarAgain, 'session.history', { sessionId: sessionAId })
+    expect((historySignedIn.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+
+    nowMs = Date.parse('2026-03-02T00:00:00.000Z')
+    const nextDay = await rpc(harness, jarAgain, 'session.prompt', {
+      sessionId: sessionBId,
+      mode: 'queue',
+      content: [{ type: 'text', text: 'tomorrow' }],
+    })
+    expect((nextDay.body as { result?: { ok?: boolean } }).result?.ok).toBe(true)
+    if (sessionBId !== undefined) idleGates.get(sessionBId)?.resolve(undefined)
   })
 })

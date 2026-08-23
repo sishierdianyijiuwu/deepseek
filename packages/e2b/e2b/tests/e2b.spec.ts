@@ -111,6 +111,7 @@ describe('E2BRuntime', () => {
     const started = await ctx.e2b.startExecutingSession(accountId('a'), SessionId('s'))
     expect(started).toEqual({ sandbox: fixture.sandbox, reused: true })
     expect(ctx.e2b.perExecutingSession).toBe(false)
+    expect(ctx.e2b.dailyCapMinutes).toBe(60)
     expect(ctx.e2b.executingSessionId(accountId('a'))).toBeUndefined()
     await fiber.dispose()
   })
@@ -228,6 +229,7 @@ describe('E2BRuntime', () => {
     [{ apiKey: '' }, /configure apiKey/],
     [{ apiKey: 'x', cwd: 'relative' }, /absolute Linux path/],
     [{ apiKey: 'x', timeoutMs: 0 }, /positive finite/],
+    [{ apiKey: 'x', dailyCapMinutes: 0 }, /dailyCapMinutes must be a positive finite/],
   ] as const)('fails self-contained configuration before opening E2B: %j', async (config, message) => {
     vi.stubEnv('E2B_API_KEY', '')
     const ctx = new Context()

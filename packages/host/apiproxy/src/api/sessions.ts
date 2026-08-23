@@ -352,7 +352,9 @@ export interface SessionsApi {
    * `subagent.prompt`. When Accounts are composed, an Account with no stored
    * model Credential is refused with `credential-missing`. A second Executing
    * Session is refused with `executing-session-busy` until the first stops;
-   * extra tabs may still read and prompt the same Executing Session.
+   * extra tabs may still read and prompt the same Executing Session. Exhausted
+   * daily execution-world time is refused with `e2b-cap-exhausted`; history
+   * reads and Credential changes still work.
    */
   prompt(request: RpcRequest<{
     sessionId: SessionId

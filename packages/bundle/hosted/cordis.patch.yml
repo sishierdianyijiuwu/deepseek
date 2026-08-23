@@ -41,6 +41,7 @@
         cwd: /home/user/workspace
         timeoutMs: !!js Number(process.env.DSH_E2B_TIMEOUT_MS || 3600000)
         perExecutingSession: true
+        dailyCapMinutes: 60
 
     - id: mailer
       name: '@deepseek-ai/dsh-mailer-smtp'
